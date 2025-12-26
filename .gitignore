@@ -1,0 +1,30 @@
+# Build artifacts
+*.o
+*.a
+*.so
+rfc2544-linux
+rfc2544
+
+# Generated files
+include/version_generated.h
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+
+# Testing
+*.log
+*.pcap
+
+# Packages
+*.deb
+*.rpm
+*.pkg
+*.tar.gz
+*.zip
