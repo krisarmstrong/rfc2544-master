@@ -58,6 +58,57 @@ struct platform_ops {
 	uint64_t (*get_rx_timestamp)(worker_ctx_t *wctx, packet_t *pkt);
 };
 
+/* Forward declarations for packet.c */
+typedef struct __attribute__((packed)) {
+	uint8_t signature[RFC2544_SIG_LEN];
+	uint32_t seq_num;
+	uint64_t timestamp;
+	uint32_t stream_id;
+	uint8_t flags;
+} rfc2544_payload_t;
+
+rfc2544_payload_t *rfc2544_create_packet_template(uint8_t *buffer, uint32_t frame_size,
+                                                   const uint8_t *src_mac, const uint8_t *dst_mac,
+                                                   uint32_t src_ip, uint32_t dst_ip,
+                                                   uint16_t src_port, uint16_t dst_port,
+                                                   uint32_t stream_id);
+void rfc2544_stamp_packet(rfc2544_payload_t *payload, uint32_t seq_num, uint64_t timestamp_ns);
+bool rfc2544_is_valid_response(const uint8_t *data, uint32_t len);
+uint32_t rfc2544_get_seq_num(const uint8_t *data, uint32_t len);
+uint64_t rfc2544_get_tx_timestamp(const uint8_t *data, uint32_t len);
+void rfc2544_calc_latency_stats(const uint64_t *samples, uint32_t count, latency_stats_t *stats);
+
+/* Forward declarations for pacing.c */
+typedef struct pacing_ctx pacing_ctx_t;
+typedef struct trial_timer trial_timer_t;
+typedef struct seq_tracker seq_tracker_t;
+
+pacing_ctx_t *pacing_create(uint64_t line_rate_bps, uint32_t frame_size, double rate_pct);
+void pacing_set_rate(pacing_ctx_t *ctx, double rate_pct);
+void pacing_set_batch_size(pacing_ctx_t *ctx, uint32_t batch_size);
+void pacing_set_busy_wait(pacing_ctx_t *ctx, bool enable);
+uint64_t pacing_wait(pacing_ctx_t *ctx);
+uint64_t pacing_wait_batch(pacing_ctx_t *ctx, uint32_t batch_size);
+void pacing_record_tx(pacing_ctx_t *ctx, uint32_t packets, uint32_t bytes);
+void pacing_get_rate(const pacing_ctx_t *ctx, double *pps, double *mbps);
+void pacing_reset(pacing_ctx_t *ctx);
+void pacing_destroy(pacing_ctx_t *ctx);
+
+trial_timer_t *trial_timer_create(uint32_t duration_sec, uint32_t warmup_sec);
+void trial_timer_start(trial_timer_t *timer);
+bool trial_timer_expired(trial_timer_t *timer);
+bool trial_timer_in_warmup(const trial_timer_t *timer);
+double trial_timer_elapsed(const trial_timer_t *timer);
+void trial_timer_destroy(trial_timer_t *timer);
+
+seq_tracker_t *rfc2544_seq_tracker_create(uint32_t capacity);
+void rfc2544_seq_tracker_record(seq_tracker_t *tracker, uint32_t seq_num);
+void rfc2544_seq_tracker_stats(const seq_tracker_t *tracker, uint32_t expected, uint32_t *received,
+                               uint32_t *lost, double *loss_pct);
+void rfc2544_seq_tracker_destroy(seq_tracker_t *tracker);
+
+uint64_t calc_max_pps(uint64_t line_rate_bps, uint32_t frame_size);
+
 /* Main test context structure */
 struct rfc2544_ctx {
 	/* Configuration */
