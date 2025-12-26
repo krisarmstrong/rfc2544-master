@@ -161,6 +161,7 @@ typedef struct {
 
 	/* Hardware timestamping */
 	bool hw_timestamp;        /* Use hardware timestamping if available */
+	bool measure_latency;     /* Enable latency measurement during tests */
 
 	/* Output */
 	stats_format_t output_format;
@@ -169,6 +170,10 @@ typedef struct {
 	/* Rate control */
 	bool use_pacing;          /* Enable software pacing */
 	uint32_t batch_size;      /* TX batch size */
+
+	/* Platform selection */
+	bool use_dpdk;            /* Use DPDK for packet I/O */
+	char *dpdk_args;          /* DPDK EAL arguments */
 } rfc2544_config_t;
 
 /* Test context */

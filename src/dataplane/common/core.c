@@ -10,6 +10,7 @@
 #include "rfc2544.h"
 #include "platform_config.h"
 
+#include <arpa/inet.h>
 #include <errno.h>
 #include <pthread.h>
 #include <stdarg.h>
@@ -572,6 +573,231 @@ int rfc2544_run(rfc2544_ctx_t *ctx)
 }
 
 /* ============================================================================
+ * Trial Execution Helper
+ * ============================================================================ */
+
+/* Trial result */
+typedef struct {
+	uint64_t packets_sent;
+	uint64_t packets_recv;
+	uint64_t bytes_sent;
+	double loss_pct;
+	double elapsed_sec;
+	double achieved_pps;
+	double achieved_mbps;
+	latency_stats_t latency;
+} trial_result_t;
+
+/**
+ * Run a single trial at the specified rate
+ *
+ * @param ctx Test context
+ * @param frame_size Frame size in bytes
+ * @param rate_pct Target rate as percentage of line rate
+ * @param duration_sec Trial duration in seconds
+ * @param warmup_sec Warmup period in seconds
+ * @param result Output trial result
+ * @return 0 on success, negative on error
+ */
+static int run_trial(rfc2544_ctx_t *ctx, uint32_t frame_size, double rate_pct,
+                     uint32_t duration_sec, uint32_t warmup_sec, trial_result_t *result)
+{
+	if (!ctx || !result)
+		return -EINVAL;
+
+	memset(result, 0, sizeof(*result));
+
+	worker_ctx_t *wctx = &ctx->workers[0];
+
+	/* Create packet template */
+	uint8_t *pkt_buffer = malloc(frame_size);
+	if (!pkt_buffer)
+		return -ENOMEM;
+
+	/* Default addresses - in real use, would be configured */
+	uint8_t src_mac[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x01};
+	uint8_t dst_mac[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x02};
+	uint32_t src_ip = htonl(0x0A000001); /* 10.0.0.1 */
+	uint32_t dst_ip = htonl(0x0A000002); /* 10.0.0.2 */
+
+	/* Use configured MAC if available */
+	if (ctx->local_mac[0] || ctx->local_mac[1] || ctx->local_mac[2]) {
+		memcpy(src_mac, ctx->local_mac, 6);
+	}
+	if (ctx->remote_mac[0] || ctx->remote_mac[1] || ctx->remote_mac[2]) {
+		memcpy(dst_mac, ctx->remote_mac, 6);
+	}
+
+	rfc2544_payload_t *payload = rfc2544_create_packet_template(
+	    pkt_buffer, frame_size, src_mac, dst_mac, src_ip, dst_ip, 12345, 3842, 0);
+
+	if (!payload) {
+		free(pkt_buffer);
+		return -EINVAL;
+	}
+
+	/* Create pacing context */
+	pacing_ctx_t *pacer = pacing_create(ctx->line_rate, frame_size, rate_pct);
+	if (!pacer) {
+		free(pkt_buffer);
+		return -ENOMEM;
+	}
+
+	/* Create trial timer */
+	trial_timer_t *timer = trial_timer_create(duration_sec, warmup_sec);
+	if (!timer) {
+		pacing_destroy(pacer);
+		free(pkt_buffer);
+		return -ENOMEM;
+	}
+
+	/* Create sequence tracker */
+	uint32_t expected_packets = (uint32_t)(calc_max_pps(ctx->line_rate, frame_size) *
+	                                       rate_pct / 100.0 * duration_sec);
+	seq_tracker_t *tracker = rfc2544_seq_tracker_create(expected_packets + 1000);
+	if (!tracker) {
+		trial_timer_destroy(timer);
+		pacing_destroy(pacer);
+		free(pkt_buffer);
+		return -ENOMEM;
+	}
+
+	/* Prepare TX packet */
+	packet_t tx_pkt;
+	tx_pkt.data = pkt_buffer;
+	tx_pkt.len = frame_size;
+
+	/* RX buffer */
+	packet_t rx_pkts[64];
+	memset(rx_pkts, 0, sizeof(rx_pkts));
+
+	/* Latency samples */
+	uint64_t *latency_samples = NULL;
+	uint32_t latency_count = 0;
+	uint32_t latency_capacity = 10000;
+	if (ctx->config.measure_latency) {
+		latency_samples = malloc(latency_capacity * sizeof(uint64_t));
+	}
+
+	/* Start trial */
+	uint32_t seq_num = 0;
+	uint64_t packets_sent = 0;
+	uint64_t packets_recv = 0;
+	uint64_t bytes_sent = 0;
+	bool in_measurement = false;
+
+	trial_timer_start(timer);
+	pacing_reset(pacer);
+
+	rfc2544_log(LOG_DEBUG, "Trial started: rate=%.2f%%, duration=%us, warmup=%us",
+	            rate_pct, duration_sec, warmup_sec);
+
+	while (!trial_timer_expired(timer) && !ctx->cancel_requested) {
+		/* Check if we've exited warmup */
+		if (!in_measurement && !trial_timer_in_warmup(timer)) {
+			in_measurement = true;
+			/* Reset counters at start of measurement */
+			seq_num = 0;
+			packets_sent = 0;
+			packets_recv = 0;
+			bytes_sent = 0;
+			pacing_reset(pacer);
+		}
+
+		/* TX: Send packet at paced rate */
+		uint64_t tx_ts = pacing_wait(pacer);
+		rfc2544_stamp_packet(payload, seq_num, tx_ts);
+		tx_pkt.timestamp = tx_ts;
+		tx_pkt.seq_num = seq_num;
+
+		int sent = ctx->platform->send_batch(wctx, &tx_pkt, 1);
+		if (sent > 0 && in_measurement) {
+			packets_sent++;
+			bytes_sent += frame_size;
+			seq_num++;
+			pacing_record_tx(pacer, 1, frame_size);
+		}
+
+		/* RX: Check for returned packets (non-blocking) */
+		int recv_count = ctx->platform->recv_batch(wctx, rx_pkts, 64);
+		for (int i = 0; i < recv_count; i++) {
+			if (rfc2544_is_valid_response(rx_pkts[i].data, rx_pkts[i].len)) {
+				uint32_t rx_seq = rfc2544_get_seq_num(rx_pkts[i].data, rx_pkts[i].len);
+
+				if (in_measurement) {
+					rfc2544_seq_tracker_record(tracker, rx_seq);
+					packets_recv++;
+
+					/* Record latency if enabled */
+					if (latency_samples && latency_count < latency_capacity) {
+						uint64_t tx_ts_pkt = rfc2544_get_tx_timestamp(
+						    rx_pkts[i].data, rx_pkts[i].len);
+						uint64_t latency = rx_pkts[i].timestamp - tx_ts_pkt;
+						latency_samples[latency_count++] = latency;
+					}
+				}
+			}
+		}
+
+		/* Release RX packets */
+		if (recv_count > 0) {
+			ctx->platform->release_batch(wctx, rx_pkts, recv_count);
+		}
+	}
+
+	/* Wait a bit for straggler packets */
+	for (int i = 0; i < 10 && !ctx->cancel_requested; i++) {
+		usleep(10000); /* 10ms */
+		int recv_count = ctx->platform->recv_batch(wctx, rx_pkts, 64);
+		for (int j = 0; j < recv_count; j++) {
+			if (rfc2544_is_valid_response(rx_pkts[j].data, rx_pkts[j].len)) {
+				uint32_t rx_seq = rfc2544_get_seq_num(rx_pkts[j].data, rx_pkts[j].len);
+				rfc2544_seq_tracker_record(tracker, rx_seq);
+				packets_recv++;
+			}
+		}
+		if (recv_count > 0) {
+			ctx->platform->release_batch(wctx, rx_pkts, recv_count);
+		}
+	}
+
+	/* Calculate results */
+	double elapsed = trial_timer_elapsed(timer);
+	result->packets_sent = packets_sent;
+	result->packets_recv = packets_recv;
+	result->bytes_sent = bytes_sent;
+	result->elapsed_sec = elapsed;
+
+	if (packets_sent > 0) {
+		result->loss_pct = 100.0 * (packets_sent - packets_recv) / packets_sent;
+	} else {
+		result->loss_pct = 0.0;
+	}
+
+	if (elapsed > 0) {
+		result->achieved_pps = packets_sent / elapsed;
+		result->achieved_mbps = (bytes_sent * 8.0) / (elapsed * 1e6);
+	}
+
+	/* Calculate latency stats */
+	if (latency_samples && latency_count > 0) {
+		rfc2544_calc_latency_stats(latency_samples, latency_count, &result->latency);
+	}
+
+	rfc2544_log(LOG_DEBUG, "Trial complete: sent=%lu, recv=%lu, loss=%.4f%%",
+	            packets_sent, packets_recv, result->loss_pct);
+
+	/* Cleanup */
+	free(latency_samples);
+	rfc2544_seq_tracker_destroy(tracker);
+	trial_timer_destroy(timer);
+	pacing_destroy(pacer);
+	free(pkt_buffer);
+
+	return 0;
+}
+
+/* ============================================================================
  * Throughput Test (Section 26.1)
  * ============================================================================ */
 
@@ -592,37 +818,41 @@ int rfc2544_throughput_test(rfc2544_ctx_t *ctx, uint32_t frame_size, throughput_
 	double high = ctx->config.initial_rate_pct;
 	double best_rate = 0.0;
 	uint32_t iterations = 0;
+	uint64_t total_frames = 0;
 
 	while ((high - low) > ctx->config.resolution_pct &&
 	       iterations < ctx->config.max_iterations && !ctx->cancel_requested) {
 
 		double current_rate = (low + high) / 2.0;
-		uint64_t target_pps = (uint64_t)(max_pps * current_rate / 100.0);
 
-		rfc2544_log(LOG_DEBUG, "Iteration %u: testing %.2f%% (%lu pps)", iterations,
-		            current_rate, target_pps);
+		rfc2544_log(LOG_DEBUG, "Iteration %u: testing %.2f%%", iterations, current_rate);
 
 		/* Run trial at current rate */
-		/* TODO: Implement actual packet transmission and reception */
-		uint64_t sent = 0, received = 0;
+		trial_result_t trial;
+		int ret = run_trial(ctx, frame_size, current_rate,
+		                    ctx->config.trial_duration_sec,
+		                    ctx->config.warmup_sec, &trial);
 
-		/* Placeholder: simulate trial */
-		usleep(100000); /* 100ms for testing */
-		sent = target_pps * ctx->config.trial_duration_sec;
-		received = sent; /* Simulate 0% loss for now */
+		if (ret < 0) {
+			rfc2544_log(LOG_ERROR, "Trial failed: %d", ret);
+			return ret;
+		}
 
-		double loss_pct = (sent > 0) ? (100.0 * (sent - received) / sent) : 100.0;
+		total_frames += trial.packets_sent;
 
-		if (loss_pct <= ctx->config.acceptable_loss) {
+		if (trial.loss_pct <= ctx->config.acceptable_loss) {
 			/* Success - try higher rate */
 			best_rate = current_rate;
 			low = current_rate;
-			rfc2544_log(LOG_DEBUG, "  Pass: loss=%.4f%%, new best=%.2f%%", loss_pct,
-			            best_rate);
+			rfc2544_log(LOG_DEBUG, "  Pass: loss=%.4f%%, new best=%.2f%%",
+			            trial.loss_pct, best_rate);
+
+			/* Store latency from best rate */
+			result->latency = trial.latency;
 		} else {
 			/* Failure - try lower rate */
 			high = current_rate;
-			rfc2544_log(LOG_DEBUG, "  Fail: loss=%.4f%%, reducing rate", loss_pct);
+			rfc2544_log(LOG_DEBUG, "  Fail: loss=%.4f%%, reducing rate", trial.loss_pct);
 		}
 
 		iterations++;
@@ -634,9 +864,10 @@ int rfc2544_throughput_test(rfc2544_ctx_t *ctx, uint32_t frame_size, throughput_
 	result->max_rate_mbps = (ctx->line_rate * best_rate / 100.0) / 1e6;
 	result->max_rate_pps = (uint64_t)(max_pps * best_rate / 100.0);
 	result->iterations = iterations;
+	result->frames_tested = total_frames;
 
-	rfc2544_log(LOG_INFO, "Throughput result: %.2f%% (%.2f Mbps, %lu pps)", result->max_rate_pct,
-	            result->max_rate_mbps, result->max_rate_pps);
+	rfc2544_log(LOG_INFO, "Throughput result: %.2f%% (%.2f Mbps, %lu pps)",
+	            result->max_rate_pct, result->max_rate_mbps, result->max_rate_pps);
 
 	if (result_count)
 		*result_count = 1;
@@ -656,16 +887,26 @@ int rfc2544_latency_test(rfc2544_ctx_t *ctx, uint32_t frame_size, double load_pc
 
 	rfc2544_log(LOG_INFO, "Latency test: frame_size=%u, load=%.1f%%", frame_size, load_pct);
 
-	/* TODO: Implement actual latency measurement */
-	/* For now, return placeholder values */
+	/* Enable latency measurement for this trial */
+	bool orig_measure = ctx->config.measure_latency;
+	ctx->config.measure_latency = true;
+
+	/* Run trial at specified load */
+	trial_result_t trial;
+	int ret = run_trial(ctx, frame_size, load_pct,
+	                    ctx->config.trial_duration_sec,
+	                    ctx->config.warmup_sec, &trial);
+
+	ctx->config.measure_latency = orig_measure;
+
+	if (ret < 0) {
+		rfc2544_log(LOG_ERROR, "Latency trial failed: %d", ret);
+		return ret;
+	}
 
 	result->frame_size = frame_size;
 	result->offered_rate_pct = load_pct;
-	result->latency.count = ctx->config.latency_samples;
-	result->latency.min_ns = 100000;            /* 100 us */
-	result->latency.max_ns = 500000;            /* 500 us */
-	result->latency.avg_ns = 200000;            /* 200 us */
-	result->latency.jitter_ns = 50000;          /* 50 us */
+	result->latency = trial.latency;
 
 	rfc2544_log(LOG_INFO, "Latency result: min=%.1f us, avg=%.1f us, max=%.1f us",
 	            result->latency.min_ns / 1000.0, result->latency.avg_ns / 1000.0,
@@ -690,12 +931,27 @@ int rfc2544_frame_loss_test(rfc2544_ctx_t *ctx, uint32_t frame_size, frame_loss_
 	double rate = ctx->config.loss_start_pct;
 
 	while (rate >= ctx->config.loss_end_pct && !ctx->cancel_requested) {
-		/* TODO: Implement actual test */
+		rfc2544_log(LOG_DEBUG, "Testing at %.1f%% load", rate);
+
+		/* Run trial at this rate */
+		trial_result_t trial;
+		int ret = run_trial(ctx, frame_size, rate,
+		                    ctx->config.trial_duration_sec,
+		                    ctx->config.warmup_sec, &trial);
+
+		if (ret < 0) {
+			rfc2544_log(LOG_ERROR, "Frame loss trial failed: %d", ret);
+			return ret;
+		}
+
 		results[count].offered_rate_pct = rate;
-		results[count].actual_rate_mbps = (ctx->line_rate * rate / 100.0) / 1e6;
-		results[count].frames_sent = 1000000;
-		results[count].frames_recv = 1000000;
-		results[count].loss_pct = 0.0;
+		results[count].actual_rate_mbps = trial.achieved_mbps;
+		results[count].frames_sent = trial.packets_sent;
+		results[count].frames_recv = trial.packets_recv;
+		results[count].loss_pct = trial.loss_pct;
+
+		rfc2544_log(LOG_DEBUG, "  Result: sent=%lu, recv=%lu, loss=%.4f%%",
+		            trial.packets_sent, trial.packets_recv, trial.loss_pct);
 
 		count++;
 		rate -= ctx->config.loss_step_pct;
@@ -716,13 +972,67 @@ int rfc2544_back_to_back_test(rfc2544_ctx_t *ctx, uint32_t frame_size, burst_res
 
 	rfc2544_log(LOG_INFO, "Back-to-back test: frame_size=%u", frame_size);
 
-	/* TODO: Implement actual burst testing */
-	result->frame_size = frame_size;
-	result->max_burst = 1000;
-	result->burst_duration = 100.0; /* 100 us */
-	result->trials = ctx->config.burst_trials;
+	/* Back-to-back test: send bursts of increasing size at line rate
+	 * until we find the maximum burst that can be received without loss.
+	 *
+	 * Per RFC 2544, we send a burst, wait for all frames to return,
+	 * then try a larger burst. Binary search would be more efficient
+	 * but linear search is more traditional for this test.
+	 */
 
-	rfc2544_log(LOG_INFO, "Back-to-back result: max_burst=%lu frames", result->max_burst);
+	uint64_t max_burst = 0;
+	uint64_t current_burst = ctx->config.initial_burst;
+	uint32_t trials_passed = 0;
+
+	/* Calculate max theoretical burst based on memory */
+	uint64_t max_possible = 1000000; /* Cap at 1M frames */
+
+	while (current_burst <= max_possible && !ctx->cancel_requested) {
+		bool all_passed = true;
+
+		/* Run multiple trials at this burst size */
+		for (uint32_t trial = 0; trial < ctx->config.burst_trials && !ctx->cancel_requested;
+		     trial++) {
+
+			/* Run burst trial at 100% rate for very short duration */
+			trial_result_t trial_result;
+			uint32_t burst_duration_ms = (current_burst * 1000) /
+			                             calc_max_pps(ctx->line_rate, frame_size);
+			if (burst_duration_ms < 1)
+				burst_duration_ms = 1;
+
+			/* Use trial helper with short duration */
+			int ret = run_trial(ctx, frame_size, 100.0,
+			                    burst_duration_ms / 1000 + 1, 0, &trial_result);
+
+			if (ret < 0) {
+				rfc2544_log(LOG_ERROR, "Burst trial failed: %d", ret);
+				return ret;
+			}
+
+			if (trial_result.loss_pct > 0) {
+				all_passed = false;
+				break;
+			}
+		}
+
+		if (all_passed) {
+			max_burst = current_burst;
+			trials_passed++;
+			current_burst *= 2; /* Double burst size */
+		} else {
+			/* Found limit - could do binary search refinement here */
+			break;
+		}
+	}
+
+	result->frame_size = frame_size;
+	result->max_burst = max_burst;
+	result->burst_duration = (double)max_burst * 1e6 / calc_max_pps(ctx->line_rate, frame_size);
+	result->trials = trials_passed;
+
+	rfc2544_log(LOG_INFO, "Back-to-back result: max_burst=%lu frames (%.1f us)",
+	            result->max_burst, result->burst_duration);
 
 	return 0;
 }
