@@ -1,0 +1,29 @@
+[Unit]
+Description=RFC2544 Test Master
+Documentation=https://github.com/krisarmstrong/rfc2544-master
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/rfc2544 --web :8080
+Restart=on-failure
+RestartSec=5s
+
+# Security hardening
+NoNewPrivileges=false
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+
+# Network requirements
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN CAP_SYS_ADMIN
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN CAP_SYS_ADMIN
+
+# Resource limits
+LimitNOFILE=65536
+LimitMEMLOCK=infinity
+
+[Install]
+WantedBy=multi-user.target

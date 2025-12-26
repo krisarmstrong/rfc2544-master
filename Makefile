@@ -48,9 +48,12 @@ ifeq ($(UNAME),Linux)
     # Check for DPDK
     HAS_DPDK := $(shell pkg-config --exists libdpdk 2>/dev/null && echo 1 || echo 0)
     ifeq ($(HAS_DPDK),1)
+        PLATFORM_SRCS += src/dataplane/linux_dpdk/dpdk_platform.c
         CFLAGS += $(shell pkg-config --cflags libdpdk) -DHAVE_DPDK=1
         LDFLAGS += $(shell pkg-config --libs libdpdk)
         $(info Building with DPDK support)
+    else
+        $(info Building without DPDK)
     endif
 
     TARGET := rfc2544-linux
@@ -121,4 +124,57 @@ format:
 lint:
 	cppcheck --enable=all --suppress=missingIncludeSystem src/ include/
 
+# ============================================================================
+# Go Control Plane (v2)
+# ============================================================================
+
+# Build Go control plane with TUI
+go-build:
+	@echo "Building Go control plane..."
+	cd cmd/rfc2544 && go build -o ../../rfc2544-v2 .
+	@echo "Built: rfc2544-v2"
+
+# Build with embedded web UI
+go-build-ui: ui-build
+	@echo "Building Go control plane with embedded UI..."
+	cd cmd/rfc2544 && go build -tags embed_ui -o ../../rfc2544-v2 .
+
+# Run Go tests
+go-test:
+	go test ./pkg/...
+
+# Build React Web UI
+ui-build:
+	@echo "Building React Web UI..."
+	cd ui && npm install && npm run build
+	@echo "Web UI built"
+
+# Development server for UI
+ui-dev:
+	cd ui && npm run dev
+
+# Full v2 build (C dataplane + Go control plane + UI)
+v2: all go-build-ui
+	@echo "RFC 2544 Test Master v2 built successfully"
+
+# ============================================================================
+# Packaging
+# ============================================================================
+
+# Build Debian package
+deb:
+	@echo "Building Debian package..."
+	mkdir -p packaging/deb/rfc2544-master/usr/bin
+	mkdir -p packaging/deb/rfc2544-master/DEBIAN
+	cp $(TARGET) packaging/deb/rfc2544-master/usr/bin/rfc2544
+	dpkg-deb --build packaging/deb/rfc2544-master
+	mv packaging/deb/rfc2544-master.deb rfc2544-master_$(VERSION)_amd64.deb
+	@echo "Built: rfc2544-master_$(VERSION)_amd64.deb"
+
+# Build RPM package (requires rpmbuild)
+rpm:
+	@echo "Building RPM package..."
+	rpmbuild -bb packaging/rpm/rfc2544-master.spec
+
 .PHONY: all linux clean install uninstall test format lint FORCE
+.PHONY: go-build go-build-ui go-test ui-build ui-dev v2 deb rpm

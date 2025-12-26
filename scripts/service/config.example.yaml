@@ -1,0 +1,78 @@
+# RFC2544 Test Master Configuration
+# Copy to /etc/rfc2544/config.yaml and modify as needed
+
+# Network interface to use for testing
+interface: eth0
+
+# Auto-detect NIC line rate (recommended)
+auto_detect_nic: true
+
+# Or specify manually (bits per second)
+# line_rate_mbps: 10000  # 10 Gbps
+
+# Test type: throughput, latency, frame_loss, back_to_back
+test_type: throughput
+
+# Frame size: 0 = all standard sizes (64, 128, 256, 512, 1024, 1280, 1518)
+frame_size: 0
+
+# Include 9000 byte jumbo frames
+include_jumbo: false
+
+# Trial timing
+trial_duration: 60s  # Duration per trial
+warmup_period: 2s    # Warmup before measurement
+
+# Throughput test (Section 26.1) settings
+throughput:
+  initial_rate_pct: 100.0   # Start at 100% line rate
+  resolution_pct: 0.1       # Binary search resolution
+  max_iterations: 20        # Max search iterations
+  acceptable_loss: 0.0      # 0% loss required (RFC 2544 default)
+
+# Latency test (Section 26.2) settings
+latency:
+  samples: 1000             # Samples per load level
+  load_levels:              # Load levels to test (% of throughput)
+    - 10
+    - 20
+    - 30
+    - 40
+    - 50
+    - 60
+    - 70
+    - 80
+    - 90
+    - 100
+
+# Frame loss test (Section 26.3) settings
+frame_loss:
+  start_pct: 100.0          # Start at 100% load
+  end_pct: 10.0             # End at 10% load
+  step_pct: 10.0            # Step by 10%
+
+# Back-to-back test (Section 26.4) settings
+back_to_back:
+  initial_burst: 1000       # Starting burst size
+  trials: 50                # Trials per burst size
+
+# Features
+hw_timestamp: true          # Use hardware timestamping if available
+measure_latency: true       # Measure latency during tests
+
+# Output format: text, json, csv
+output_format: text
+verbose: false
+
+# Platform selection
+use_dpdk: false             # Use DPDK (requires bound NIC)
+# dpdk_args: "--lcores=1-4 -a 0000:04:00.0"
+
+# Rate control
+use_pacing: true            # Enable software pacing
+batch_size: 32              # TX batch size
+
+# Web UI
+web_ui:
+  enabled: true
+  address: ":8080"

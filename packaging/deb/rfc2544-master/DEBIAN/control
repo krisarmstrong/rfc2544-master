@@ -1,0 +1,21 @@
+Package: rfc2544-master
+Version: 2.0.0
+Section: net
+Priority: optional
+Architecture: amd64
+Depends: libc6 (>= 2.17)
+Maintainer: Kris Armstrong <kris@example.com>
+Description: RFC2544 Network Benchmark Test Master
+ High-performance network benchmark testing per RFC 2544:
+ - Throughput testing with binary search (Section 26.1)
+ - Latency measurement at various loads (Section 26.2)
+ - Frame loss rate testing (Section 26.3)
+ - Back-to-back burst capacity testing (Section 26.4)
+ .
+ Features:
+ - AF_XDP for 10-40G performance
+ - DPDK support for 100G line-rate
+ - Terminal UI (TUI) for interactive testing
+ - Web UI for remote monitoring
+ - JSON/CSV output formats
+Homepage: https://github.com/krisarmstrong/rfc2544-master

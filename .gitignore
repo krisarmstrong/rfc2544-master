@@ -3,7 +3,8 @@
 *.a
 *.so
 rfc2544-linux
-rfc2544
+/rfc2544
+rfc2544-v2
 
 # Generated files
 include/version_generated.h
