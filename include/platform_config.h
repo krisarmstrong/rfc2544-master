@@ -113,9 +113,13 @@
 #define UDP_HEADER_LEN 8
 #define MIN_PAYLOAD_SIZE 18 /* Minimum to avoid runt frames */
 
-/* Protocol numbers */
+/* Protocol numbers - only define if not already available from system headers */
+#if !defined(__linux__) && !defined(IPPROTO_UDP)
 #define IPPROTO_UDP 17
+#endif
+#if !defined(__linux__) && !defined(ETH_P_IP)
 #define ETH_P_IP 0x0800
+#endif
 
 /* ============================================================================
  * Performance Targets

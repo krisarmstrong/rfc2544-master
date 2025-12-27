@@ -8,6 +8,7 @@
  */
 
 #include "rfc2544.h"
+#include "rfc2544_internal.h"
 #include "platform_config.h"
 
 #include <arpa/inet.h>
@@ -20,23 +21,13 @@
 #include <time.h>
 #include <unistd.h>
 
-/* Forward declarations for platform ops */
-typedef struct platform_ops platform_ops_t;
-
-/* Per-worker context (for multi-queue support) */
-typedef struct {
-	int worker_id;
-	int queue_id;
-	void *pctx; /* Platform-specific context */
-
-	/* Stats */
-	uint64_t tx_packets;
-	uint64_t tx_bytes;
-	uint64_t rx_packets;
-	uint64_t rx_bytes;
-	uint64_t tx_errors;
-	uint64_t rx_errors;
-} worker_ctx_t;
+#if PLATFORM_LINUX
+#include <linux/ethtool.h>
+#include <linux/sockios.h>
+#include <net/if.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+#endif
 
 /* Internal packet structure */
 typedef struct {
@@ -110,55 +101,19 @@ void rfc2544_seq_tracker_destroy(seq_tracker_t *tracker);
 
 uint64_t calc_max_pps(uint64_t line_rate_bps, uint32_t frame_size);
 
-/* Main test context structure */
-struct rfc2544_ctx {
-	/* Configuration */
-	rfc2544_config_t config;
+/* Forward declarations for y1564.c */
+int y1564_config_test(rfc2544_ctx_t *ctx, const y1564_service_t *service,
+                      y1564_config_result_t *result);
+int y1564_perf_test(rfc2544_ctx_t *ctx, const y1564_service_t *service,
+                    uint32_t duration_sec, y1564_perf_result_t *result);
+int y1564_multi_service_test(rfc2544_ctx_t *ctx, const y1564_service_t *services,
+                             uint32_t service_count, y1564_config_result_t *config_results,
+                             y1564_perf_result_t *perf_results);
+void y1564_print_results(const y1564_config_result_t *config_results,
+                         const y1564_perf_result_t *perf_results, uint32_t service_count,
+                         stats_format_t format);
 
-	/* State */
-	test_state_t state;
-	volatile bool cancel_requested;
-
-	/* Platform */
-	const platform_ops_t *platform;
-	worker_ctx_t *workers;
-	int num_workers;
-
-	/* Interface info */
-	char interface[64];
-	uint64_t line_rate;
-	uint8_t local_mac[6];
-	uint8_t remote_mac[6];
-	uint32_t local_ip;
-	uint32_t remote_ip;
-
-	/* Timing */
-	struct timespec start_time;
-	struct timespec end_time;
-
-	/* Results storage */
-	throughput_result_t throughput_results[8]; /* 7 standard + 1 jumbo */
-	uint32_t throughput_count;
-	latency_result_t latency_results[80]; /* 10 load levels x 8 sizes */
-	uint32_t latency_count;
-	frame_loss_point_t loss_results[100]; /* Up to 100 load points */
-	uint32_t loss_count;
-	burst_result_t burst_results[8];
-	uint32_t burst_count;
-
-	/* Callbacks */
-	progress_callback_t progress_cb;
-
-	/* Sequence tracking */
-	uint32_t next_seq_num;
-	pthread_mutex_t seq_lock;
-
-	/* Latency tracking */
-	uint64_t *latency_samples;
-	uint32_t latency_sample_count;
-	uint32_t latency_sample_capacity;
-	pthread_mutex_t latency_lock;
-};
+/* struct rfc2544_ctx is defined in rfc2544_internal.h */
 
 /* Global log level */
 static log_level_t g_log_level = LOG_INFO;
@@ -172,7 +127,7 @@ void rfc2544_set_log_level(log_level_t level)
 	g_log_level = level;
 }
 
-static void rfc2544_log(log_level_t level, const char *fmt, ...)
+void rfc2544_log(log_level_t level, const char *fmt, ...)
 {
 	if (level > g_log_level)
 		return;
@@ -214,6 +169,8 @@ static const platform_ops_t *select_platform(rfc2544_ctx_t *ctx)
 		rfc2544_log(LOG_INFO, "Platform: DPDK (line-rate mode)");
 		return get_dpdk_platform_ops();
 	}
+#else
+	(void)ctx; /* Silence unused parameter warning when DPDK disabled */
 #endif
 
 #if HAVE_AF_XDP
@@ -287,9 +244,49 @@ uint64_t rfc2544_calc_pps(uint64_t line_rate, uint32_t frame_size)
 
 uint64_t rfc2544_get_line_rate(const char *interface)
 {
-	/* TODO: Query interface speed via ethtool/sysfs */
-	(void)interface;
-	return 10000000000ULL; /* Default 10 Gbps */
+#if PLATFORM_LINUX
+	/* Try sysfs first - most reliable on modern Linux */
+	char path[256];
+	snprintf(path, sizeof(path), "/sys/class/net/%s/speed", interface);
+
+	FILE *f = fopen(path, "r");
+	if (f) {
+		int speed_mbps = 0;
+		if (fscanf(f, "%d", &speed_mbps) == 1 && speed_mbps > 0) {
+			fclose(f);
+			rfc2544_log(LOG_DEBUG, "Interface %s speed: %d Mbps (from sysfs)", interface, speed_mbps);
+			return (uint64_t)speed_mbps * 1000000ULL;
+		}
+		fclose(f);
+	}
+
+	/* Try ethtool ioctl as fallback */
+	int sock = socket(AF_INET, SOCK_DGRAM, 0);
+	if (sock >= 0) {
+		struct ifreq ifr;
+		struct ethtool_cmd ecmd;
+
+		memset(&ifr, 0, sizeof(ifr));
+		strncpy(ifr.ifr_name, interface, IFNAMSIZ - 1);
+
+		ecmd.cmd = ETHTOOL_GSET;
+		ifr.ifr_data = (void *)&ecmd;
+
+		if (ioctl(sock, SIOCETHTOOL, &ifr) == 0) {
+			uint32_t speed = ethtool_cmd_speed(&ecmd);
+			close(sock);
+			if (speed != (uint32_t)-1 && speed > 0) {
+				rfc2544_log(LOG_DEBUG, "Interface %s speed: %u Mbps (from ethtool)", interface, speed);
+				return (uint64_t)speed * 1000000ULL;
+			}
+		}
+		close(sock);
+	}
+#endif
+
+	/* Default to 10 Gbps if detection fails */
+	rfc2544_log(LOG_WARN, "Could not detect interface speed for %s, assuming 10 Gbps", interface);
+	return 10000000000ULL;
 }
 
 static uint64_t get_timestamp_ns(void)
@@ -297,6 +294,71 @@ static uint64_t get_timestamp_ns(void)
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	return (uint64_t)ts.tv_sec * NS_PER_SEC + ts.tv_nsec;
+}
+
+/* ============================================================================
+ * Context Accessor Functions (for y1564.c and other modules)
+ * ============================================================================ */
+
+const platform_ops_t *rfc2544_get_platform(const rfc2544_ctx_t *ctx)
+{
+	return ctx ? ctx->platform : NULL;
+}
+
+worker_ctx_t *rfc2544_get_worker(rfc2544_ctx_t *ctx, int index)
+{
+	if (!ctx || !ctx->workers || index < 0 || index >= ctx->num_workers)
+		return NULL;
+	return &ctx->workers[index];
+}
+
+uint64_t rfc2544_get_line_rate_ctx(const rfc2544_ctx_t *ctx)
+{
+	return ctx ? ctx->line_rate : 0;
+}
+
+void rfc2544_get_macs(const rfc2544_ctx_t *ctx, uint8_t *src_mac, uint8_t *dst_mac)
+{
+	if (!ctx)
+		return;
+	if (src_mac)
+		memcpy(src_mac, ctx->local_mac, 6);
+	if (dst_mac)
+		memcpy(dst_mac, ctx->remote_mac, 6);
+}
+
+void rfc2544_get_ips(const rfc2544_ctx_t *ctx, uint32_t *src_ip, uint32_t *dst_ip)
+{
+	if (!ctx)
+		return;
+	if (src_ip)
+		*src_ip = ctx->local_ip;
+	if (dst_ip)
+		*dst_ip = ctx->remote_ip;
+}
+
+bool rfc2544_is_cancelled(const rfc2544_ctx_t *ctx)
+{
+	return ctx ? ctx->cancel_requested : true;
+}
+
+void rfc2544_log_internal(log_level_t level, const char *fmt, ...)
+{
+	if (level > g_log_level)
+		return;
+
+	const char *level_str[] = {"ERROR", "WARN", "INFO", "DEBUG"};
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+
+	fprintf(stderr, "[%ld.%03ld] [%s] ", ts.tv_sec, ts.tv_nsec / 1000000, level_str[level]);
+
+	va_list args;
+	va_start(args, fmt);
+	vfprintf(stderr, fmt, args);
+	va_end(args);
+
+	fprintf(stderr, "\n");
 }
 
 /* ============================================================================
@@ -329,6 +391,8 @@ int rfc2544_init(rfc2544_ctx_t **ctx_out, const char *interface)
 	ctx->latency_sample_capacity = 100000;
 	ctx->latency_samples = malloc(ctx->latency_sample_capacity * sizeof(uint64_t));
 	if (!ctx->latency_samples) {
+		pthread_mutex_destroy(&ctx->seq_lock);
+		pthread_mutex_destroy(&ctx->latency_lock);
 		free(ctx);
 		return -ENOMEM;
 	}
@@ -397,9 +461,14 @@ void rfc2544_cleanup(rfc2544_ctx_t *ctx)
 	/* Cancel if running */
 	if (ctx->state == STATE_RUNNING) {
 		rfc2544_cancel(ctx);
-		/* Wait for completion */
-		while (ctx->state == STATE_RUNNING) {
+		/* Wait for completion with timeout (max 10 seconds) */
+		int timeout_count = 0;
+		while (ctx->state == STATE_RUNNING && timeout_count < 1000) {
 			usleep(10000);
+			timeout_count++;
+		}
+		if (ctx->state == STATE_RUNNING) {
+			rfc2544_log(LOG_ERROR, "Cleanup timeout waiting for test to stop");
 		}
 	}
 
@@ -465,6 +534,12 @@ int rfc2544_run(rfc2544_ctx_t *ctx)
 		ctx->workers[i].queue_id = i;
 		if (ctx->platform->init(ctx, &ctx->workers[i]) < 0) {
 			rfc2544_log(LOG_ERROR, "Failed to initialize platform");
+			/* Cleanup already-initialized workers */
+			for (int j = 0; j < i; j++) {
+				ctx->platform->cleanup(&ctx->workers[j]);
+			}
+			free(ctx->workers);
+			ctx->workers = NULL;
 			ctx->state = STATE_FAILED;
 			return -EIO;
 		}
@@ -548,6 +623,56 @@ int rfc2544_run(rfc2544_ctx_t *ctx)
 			if (ret < 0)
 				break;
 			ctx->burst_count++;
+		}
+		break;
+
+	case TEST_Y1564_CONFIG:
+		report_progress(ctx, "Starting Y.1564 Configuration test", 0);
+		{
+			const y1564_config_t *y1564_cfg = &ctx->config.y1564;
+			for (uint32_t i = 0; i < y1564_cfg->service_count && !ctx->cancel_requested; i++) {
+				if (!y1564_cfg->services[i].enabled)
+					continue;
+				y1564_config_result_t config_result;
+				ret = y1564_config_test(ctx, &y1564_cfg->services[i], &config_result);
+				if (ret < 0)
+					break;
+			}
+		}
+		break;
+
+	case TEST_Y1564_PERF:
+		report_progress(ctx, "Starting Y.1564 Performance test", 0);
+		{
+			const y1564_config_t *y1564_cfg = &ctx->config.y1564;
+			for (uint32_t i = 0; i < y1564_cfg->service_count && !ctx->cancel_requested; i++) {
+				if (!y1564_cfg->services[i].enabled)
+					continue;
+				y1564_perf_result_t perf_result;
+				ret = y1564_perf_test(ctx, &y1564_cfg->services[i],
+				                      y1564_cfg->perf_duration_sec, &perf_result);
+				if (ret < 0)
+					break;
+			}
+		}
+		break;
+
+	case TEST_Y1564_FULL:
+		report_progress(ctx, "Starting Y.1564 Full test suite", 0);
+		{
+			const y1564_config_t *y1564_cfg = &ctx->config.y1564;
+			y1564_config_result_t config_results[Y1564_MAX_SERVICES];
+			y1564_perf_result_t perf_results[Y1564_MAX_SERVICES];
+			memset(config_results, 0, sizeof(config_results));
+			memset(perf_results, 0, sizeof(perf_results));
+
+			ret = y1564_multi_service_test(ctx, y1564_cfg->services, y1564_cfg->service_count,
+			                               config_results, perf_results);
+
+			if (ret == 0) {
+				y1564_print_results(config_results, perf_results, y1564_cfg->service_count,
+			                    ctx->config.output_format);
+			}
 		}
 		break;
 
@@ -651,8 +776,8 @@ static int run_trial(rfc2544_ctx_t *ctx, uint32_t frame_size, double rate_pct,
 		return -ENOMEM;
 	}
 
-	/* Create sequence tracker */
-	uint32_t expected_packets = (uint32_t)(calc_max_pps(ctx->line_rate, frame_size) *
+	/* Create sequence tracker (use uint64_t to avoid overflow at high rates) */
+	uint64_t expected_packets = (uint64_t)(calc_max_pps(ctx->line_rate, frame_size) *
 	                                       rate_pct / 100.0 * duration_sec);
 	seq_tracker_t *tracker = rfc2544_seq_tracker_create(expected_packets + 1000);
 	if (!tracker) {
@@ -1038,6 +1163,174 @@ int rfc2544_back_to_back_test(rfc2544_ctx_t *ctx, uint32_t frame_size, burst_res
 }
 
 /* ============================================================================
+ * System Recovery Test (Section 26.5)
+ * ============================================================================ */
+
+int rfc2544_system_recovery_test(rfc2544_ctx_t *ctx, uint32_t frame_size,
+                                 double throughput_pct, uint32_t overload_sec,
+                                 recovery_result_t *result)
+{
+	if (!ctx || !result)
+		return -EINVAL;
+
+	rfc2544_log(LOG_INFO, "System recovery test: frame_size=%u, throughput=%.2f%%",
+	            frame_size, throughput_pct);
+
+	memset(result, 0, sizeof(*result));
+	result->frame_size = frame_size;
+	result->overload_rate_pct = throughput_pct * 1.1; /* 110% of throughput */
+	result->recovery_rate_pct = throughput_pct * 0.5; /* 50% of throughput */
+	result->overload_sec = overload_sec;
+
+	/*
+	 * RFC 2544 Section 26.5 - System Recovery:
+	 * 1. Send at 110% of determined throughput for overload_sec seconds
+	 * 2. Drop to 50% of throughput
+	 * 3. Measure time until frame loss reaches zero
+	 */
+
+	/* Phase 1: Overload */
+	rfc2544_log(LOG_INFO, "Phase 1: Sending at %.1f%% for %u seconds (overload)",
+	            result->overload_rate_pct, overload_sec);
+
+	trial_result_t overload_trial;
+	int ret = run_trial(ctx, frame_size, result->overload_rate_pct, overload_sec, 0, &overload_trial);
+	if (ret < 0) {
+		rfc2544_log(LOG_ERROR, "Overload phase failed: %d", ret);
+		return ret;
+	}
+
+	/* Phase 2: Recovery - send at 50% and measure time to zero loss */
+	rfc2544_log(LOG_INFO, "Phase 2: Dropping to %.1f%% and measuring recovery time",
+	            result->recovery_rate_pct);
+
+	uint64_t recovery_start = get_timestamp_ns();
+	uint64_t frames_lost = 0;
+	bool recovered = false;
+	uint32_t check_interval_ms = 100; /* Check every 100ms */
+	uint32_t max_recovery_sec = 60;   /* Max 60 seconds to recover */
+
+	for (uint32_t i = 0; i < (max_recovery_sec * 1000 / check_interval_ms); i++) {
+		if (ctx->cancel_requested)
+			break;
+
+		trial_result_t recovery_trial;
+		/* Run short trial at recovery rate */
+		ret = run_trial(ctx, frame_size, result->recovery_rate_pct, 1, 0, &recovery_trial);
+		if (ret < 0)
+			break;
+
+		if (recovery_trial.loss_pct <= 0.001) { /* Effectively zero loss */
+			recovered = true;
+			result->recovery_time_ms = (get_timestamp_ns() - recovery_start) / 1e6;
+			break;
+		}
+
+		frames_lost += (recovery_trial.packets_sent - recovery_trial.packets_recv);
+		usleep(check_interval_ms * 1000);
+	}
+
+	result->frames_lost = frames_lost;
+	result->trials = 1;
+
+	if (recovered) {
+		rfc2544_log(LOG_INFO, "System recovery result: %.2f ms, %lu frames lost",
+		            result->recovery_time_ms, result->frames_lost);
+	} else {
+		rfc2544_log(LOG_WARN, "System did not recover within %u seconds", max_recovery_sec);
+		result->recovery_time_ms = -1.0; /* Did not recover */
+	}
+
+	return 0;
+}
+
+/* ============================================================================
+ * Reset Test (Section 26.6)
+ * ============================================================================ */
+
+int rfc2544_reset_test(rfc2544_ctx_t *ctx, uint32_t frame_size, reset_result_t *result)
+{
+	if (!ctx || !result)
+		return -EINVAL;
+
+	rfc2544_log(LOG_INFO, "Reset test: frame_size=%u", frame_size);
+	rfc2544_log(LOG_WARN, "NOTE: Reset test requires external reset trigger");
+
+	memset(result, 0, sizeof(*result));
+	result->frame_size = frame_size;
+	result->manual_reset = true;
+
+	/*
+	 * RFC 2544 Section 26.6 - Reset:
+	 * This test measures the time for a device to resume forwarding
+	 * after various reset conditions (power, software, hardware).
+	 *
+	 * The test procedure is:
+	 * 1. Send continuous traffic at throughput rate
+	 * 2. Trigger reset (manually or via external mechanism)
+	 * 3. Measure time until frames start being forwarded again
+	 *
+	 * NOTE: This implementation waits for reset trigger via user input
+	 * or external signal. For automated testing, integrate with power
+	 * control or management interface.
+	 */
+
+	rfc2544_log(LOG_INFO, "Starting background traffic at throughput rate");
+	rfc2544_log(LOG_INFO, "Trigger device reset when ready...");
+
+	/* Send continuous traffic and monitor for interruption */
+	uint64_t monitor_start = get_timestamp_ns();
+	(void)monitor_start; /* Used for potential future enhancements */
+	uint64_t first_loss_time = 0;
+	uint64_t recovery_time = 0;
+	uint64_t frames_lost = 0;
+	bool loss_detected = false;
+	bool recovered = false;
+
+	uint32_t max_wait_sec = 300; /* 5 minutes max wait for reset */
+
+	for (uint32_t sec = 0; sec < max_wait_sec && !ctx->cancel_requested; sec++) {
+		trial_result_t trial;
+		int ret = run_trial(ctx, frame_size, 100.0, 1, 0, &trial);
+		if (ret < 0) {
+			continue;
+		}
+
+		if (trial.loss_pct > 0.1) { /* Significant loss detected */
+			if (!loss_detected) {
+				loss_detected = true;
+				first_loss_time = get_timestamp_ns();
+				rfc2544_log(LOG_INFO, "Reset detected - loss started");
+			}
+			frames_lost += (trial.packets_sent - trial.packets_recv);
+		} else if (loss_detected && trial.loss_pct <= 0.001) {
+			/* Recovery after loss */
+			recovery_time = get_timestamp_ns();
+			recovered = true;
+			rfc2544_log(LOG_INFO, "Forwarding resumed");
+			break;
+		}
+	}
+
+	if (loss_detected && recovered) {
+		result->reset_time_ms = (recovery_time - first_loss_time) / 1e6;
+		result->frames_lost = frames_lost;
+		result->trials = 1;
+
+		rfc2544_log(LOG_INFO, "Reset test result: %.2f ms reset time, %lu frames lost",
+		            result->reset_time_ms, result->frames_lost);
+	} else if (!loss_detected) {
+		rfc2544_log(LOG_WARN, "No reset detected within %u seconds", max_wait_sec);
+		result->reset_time_ms = -1.0;
+	} else {
+		rfc2544_log(LOG_WARN, "Reset detected but device did not recover");
+		result->reset_time_ms = -1.0;
+	}
+
+	return 0;
+}
+
+/* ============================================================================
  * Results Printing
  * ============================================================================ */
 
@@ -1064,7 +1357,7 @@ void rfc2544_print_results(const rfc2544_ctx_t *ctx)
 		printf("-----------------------------------------------------------------\n");
 		for (uint32_t i = 0; i < ctx->throughput_count; i++) {
 			const throughput_result_t *r = &ctx->throughput_results[i];
-			printf("%-10u %11.2f%% %12.2f %15lu %10u\n", r->frame_size, r->max_rate_pct,
+			printf("%-10u %11.2f%% %12.2f %15.0f %10u\n", r->frame_size, r->max_rate_pct,
 			       r->max_rate_mbps, r->max_rate_pps, r->iterations);
 		}
 		printf("\n");

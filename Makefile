@@ -26,7 +26,8 @@ UNAME := $(shell uname -s)
 COMMON_SRCS := src/dataplane/common/core.c \
                src/dataplane/common/main.c \
                src/dataplane/common/packet.c \
-               src/dataplane/common/pacing.c
+               src/dataplane/common/pacing.c \
+               src/dataplane/common/y1564.c
 
 # Platform-specific sources
 ifeq ($(UNAME),Linux)

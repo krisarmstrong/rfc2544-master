@@ -13,10 +13,15 @@ import (
 type TestType string
 
 const (
-	TestThroughput  TestType = "throughput"   // Section 26.1
-	TestLatency     TestType = "latency"      // Section 26.2
-	TestFrameLoss   TestType = "frame_loss"   // Section 26.3
-	TestBackToBack  TestType = "back_to_back" // Section 26.4
+	TestThroughput      TestType = "throughput"       // Section 26.1
+	TestLatency         TestType = "latency"          // Section 26.2
+	TestFrameLoss       TestType = "frame_loss"       // Section 26.3
+	TestBackToBack      TestType = "back_to_back"     // Section 26.4
+	TestSystemRecovery  TestType = "system_recovery"  // Section 26.5
+	TestReset           TestType = "reset"            // Section 26.6
+	TestY1564Config     TestType = "y1564_config"     // ITU-T Y.1564 Service Configuration Test
+	TestY1564Perf       TestType = "y1564_perf"       // ITU-T Y.1564 Service Performance Test
+	TestY1564Full       TestType = "y1564"            // ITU-T Y.1564 Full Test (Config + Perf)
 )
 
 // OutputFormat for results
@@ -74,6 +79,9 @@ type Config struct {
 
 	// Web UI
 	WebUI    WebUIConfig `yaml:"web_ui"`
+
+	// ITU-T Y.1564 (EtherSAM) configuration
+	Y1564 Y1564Config `yaml:"y1564"`
 }
 
 // ThroughputConfig for binary search throughput test
@@ -107,6 +115,62 @@ type BackToBackConfig struct {
 type WebUIConfig struct {
 	Enabled bool   `yaml:"enabled"`
 	Address string `yaml:"address"` // e.g., ":8080"
+}
+
+// Y1564SLA defines SLA parameters for Y.1564 testing
+type Y1564SLA struct {
+	CIRMbps         float64 `yaml:"cir_mbps"`          // Committed Information Rate
+	EIRMbps         float64 `yaml:"eir_mbps"`          // Excess Information Rate
+	CBSBytes        uint32  `yaml:"cbs_bytes"`         // Committed Burst Size
+	EBSBytes        uint32  `yaml:"ebs_bytes"`         // Excess Burst Size
+	FDThresholdMs   float64 `yaml:"fd_threshold_ms"`   // Frame Delay threshold (ms)
+	FDVThresholdMs  float64 `yaml:"fdv_threshold_ms"`  // Frame Delay Variation threshold (ms)
+	FLRThresholdPct float64 `yaml:"flr_threshold_pct"` // Frame Loss Ratio threshold (%)
+}
+
+// Y1564Service defines a service for Y.1564 testing
+type Y1564Service struct {
+	ServiceID   uint32   `yaml:"service_id"`
+	ServiceName string   `yaml:"service_name"`
+	SLA         Y1564SLA `yaml:"sla"`
+	FrameSize   uint32   `yaml:"frame_size"`
+	CoS         uint8    `yaml:"cos"` // Class of Service (DSCP value)
+	Enabled     bool     `yaml:"enabled"`
+}
+
+// Y1564Config for ITU-T Y.1564 testing
+type Y1564Config struct {
+	Services        []Y1564Service `yaml:"services"`
+	ConfigSteps     []float64      `yaml:"config_steps"`      // Step percentages (default: 25, 50, 75, 100)
+	StepDuration    time.Duration  `yaml:"step_duration"`     // Duration per step (default: 60s)
+	PerfDuration    time.Duration  `yaml:"perf_duration"`     // Performance test duration (default: 15m)
+	RunConfigTest   bool           `yaml:"run_config_test"`   // Run configuration test
+	RunPerfTest     bool           `yaml:"run_perf_test"`     // Run performance test
+}
+
+// DefaultY1564SLA returns default SLA parameters
+func DefaultY1564SLA() Y1564SLA {
+	return Y1564SLA{
+		CIRMbps:         100.0,
+		EIRMbps:         0.0,
+		CBSBytes:        12000,
+		EBSBytes:        0,
+		FDThresholdMs:   10.0,
+		FDVThresholdMs:  5.0,
+		FLRThresholdPct: 0.01,
+	}
+}
+
+// DefaultY1564Config returns default Y.1564 configuration
+func DefaultY1564Config() Y1564Config {
+	return Y1564Config{
+		Services:      []Y1564Service{},
+		ConfigSteps:   []float64{25, 50, 75, 100},
+		StepDuration:  60 * time.Second,
+		PerfDuration:  15 * time.Minute,
+		RunConfigTest: true,
+		RunPerfTest:   true,
+	}
 }
 
 // DefaultConfig returns a configuration with RFC 2544 recommended defaults
@@ -154,6 +218,8 @@ func DefaultConfig() *Config {
 			Enabled: false,
 			Address: ":8080",
 		},
+
+		Y1564: DefaultY1564Config(),
 	}
 }
 
@@ -199,7 +265,17 @@ func (c *Config) Validate() error {
 	// Validate test type
 	switch c.TestType {
 	case TestThroughput, TestLatency, TestFrameLoss, TestBackToBack:
-		// Valid
+		// Valid RFC 2544 test types
+	case TestY1564Config, TestY1564Perf, TestY1564Full:
+		// Valid Y.1564 test types - validate Y.1564 config
+		if len(c.Y1564.Services) == 0 {
+			return fmt.Errorf("Y.1564 test requires at least one service configured")
+		}
+		for i, svc := range c.Y1564.Services {
+			if svc.Enabled && svc.SLA.CIRMbps <= 0 {
+				return fmt.Errorf("service %d: CIR must be > 0", i+1)
+			}
+		}
 	default:
 		return fmt.Errorf("invalid test type: %s", c.TestType)
 	}

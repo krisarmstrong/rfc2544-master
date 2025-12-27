@@ -8,6 +8,7 @@
  */
 
 #include "rfc2544.h"
+#include "rfc2544_internal.h"
 #include "platform_config.h"
 
 #if HAVE_AF_XDP
@@ -25,26 +26,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
+#include <linux/sockios.h>
 #include <unistd.h>
 #include <xdp/libxdp.h>
 #include <xdp/xsk.h>
 
-/* Forward declarations */
-typedef struct rfc2544_ctx rfc2544_ctx_t;
-typedef struct {
-	int worker_id;
-	int queue_id;
-	void *pctx;
-	uint64_t tx_packets;
-	uint64_t tx_bytes;
-	uint64_t rx_packets;
-	uint64_t rx_bytes;
-	uint64_t tx_errors;
-	uint64_t rx_errors;
-} worker_ctx_t;
+/* worker_ctx_t and rfc2544_ctx_t are defined in rfc2544_internal.h */
 
 typedef struct {
 	uint8_t *data;
@@ -411,11 +402,16 @@ static int xdp_recv_batch(worker_ctx_t *wctx, packet_t *pkts, int max_count)
 	/* Refill fill ring */
 	uint32_t idx_fill;
 	unsigned int slots = xsk_ring_prod__reserve(&pctx->fill_ring, rcvd, &idx_fill);
+	unsigned int filled = 0;
 	for (unsigned int i = 0; i < slots; i++) {
-		*xsk_ring_prod__fill_addr(&pctx->fill_ring, idx_fill++) =
-		    frame_alloc_get(&pctx->frame_alloc);
+		uint64_t addr = frame_alloc_get(&pctx->frame_alloc);
+		if (addr == INVALID_UMEM_FRAME) {
+			break; /* No more frames available */
+		}
+		*xsk_ring_prod__fill_addr(&pctx->fill_ring, idx_fill++) = addr;
+		filled++;
 	}
-	xsk_ring_prod__submit(&pctx->fill_ring, slots);
+	xsk_ring_prod__submit(&pctx->fill_ring, filled);
 
 	return received;
 }

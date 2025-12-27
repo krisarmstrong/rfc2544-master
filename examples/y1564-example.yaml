@@ -1,0 +1,93 @@
+# ITU-T Y.1564 (EtherSAM) Test Configuration Example
+#
+# This configuration demonstrates multi-service Y.1564 testing with
+# different QoS classes and SLA parameters.
+
+interface: eth0
+test_type: y1564
+line_rate_mbps: 10000  # 10 Gbps line rate
+
+# Y.1564 specific configuration
+y1564:
+  # Step percentages for Service Configuration Test
+  # Default per ITU-T Y.1564: 25%, 50%, 75%, 100% of CIR
+  config_steps: [25, 50, 75, 100]
+
+  # Duration for each step (default: 60s)
+  step_duration: 60s
+
+  # Duration for Service Performance Test (default: 15m)
+  perf_duration: 15m
+
+  # Which tests to run
+  run_config_test: true
+  run_perf_test: true
+
+  # Service definitions (up to 8 services)
+  services:
+    # Service 1: Voice (High priority, low bandwidth, strict requirements)
+    - service_id: 1
+      service_name: "Voice"
+      frame_size: 128
+      cos: 46  # EF DSCP (Expedited Forwarding)
+      enabled: true
+      sla:
+        cir_mbps: 10.0        # 10 Mbps Committed Information Rate
+        eir_mbps: 0.0         # No excess bandwidth
+        cbs_bytes: 12000      # 12 KB Committed Burst Size
+        ebs_bytes: 0          # No excess burst
+        fd_threshold_ms: 10.0   # Max 10ms latency
+        fdv_threshold_ms: 5.0   # Max 5ms jitter
+        flr_threshold_pct: 0.01 # Max 0.01% packet loss
+
+    # Service 2: Video (High priority, high bandwidth)
+    - service_id: 2
+      service_name: "Video"
+      frame_size: 1518
+      cos: 34  # AF41 DSCP (Assured Forwarding)
+      enabled: true
+      sla:
+        cir_mbps: 100.0
+        eir_mbps: 50.0        # Up to 50 Mbps excess
+        cbs_bytes: 64000
+        ebs_bytes: 32000
+        fd_threshold_ms: 50.0
+        fdv_threshold_ms: 30.0
+        flr_threshold_pct: 0.1
+
+    # Service 3: Data (Best effort, burstable)
+    - service_id: 3
+      service_name: "Data"
+      frame_size: 1518
+      cos: 0   # Best Effort
+      enabled: true
+      sla:
+        cir_mbps: 500.0
+        eir_mbps: 200.0
+        cbs_bytes: 128000
+        ebs_bytes: 64000
+        fd_threshold_ms: 100.0
+        fdv_threshold_ms: 50.0
+        flr_threshold_pct: 0.5
+
+    # Service 4: Management (Low bandwidth, reliability focused)
+    - service_id: 4
+      service_name: "Management"
+      frame_size: 64
+      cos: 48  # CS6 DSCP (Network Control)
+      enabled: true
+      sla:
+        cir_mbps: 1.0
+        eir_mbps: 0.0
+        cbs_bytes: 8000
+        ebs_bytes: 0
+        fd_threshold_ms: 20.0
+        fdv_threshold_ms: 10.0
+        flr_threshold_pct: 0.001
+
+# Output settings
+output_format: text
+verbose: false
+
+# Hardware timestamping (recommended for accuracy)
+hw_timestamp: true

@@ -52,11 +52,16 @@ typedef enum {
 
 /* Test types */
 typedef enum {
-	TEST_THROUGHPUT = 0,   /* RFC2544.26.1 - Binary search for max throughput */
-	TEST_LATENCY = 1,      /* RFC2544.26.2 - Round-trip latency */
-	TEST_FRAME_LOSS = 2,   /* RFC2544.26.3 - Frame loss rate */
-	TEST_BACK_TO_BACK = 3, /* RFC2544.26.4 - Burst capacity */
-	TEST_COUNT = 4
+	TEST_THROUGHPUT = 0,      /* RFC2544.26.1 - Binary search for max throughput */
+	TEST_LATENCY = 1,         /* RFC2544.26.2 - Round-trip latency */
+	TEST_FRAME_LOSS = 2,      /* RFC2544.26.3 - Frame loss rate */
+	TEST_BACK_TO_BACK = 3,    /* RFC2544.26.4 - Burst capacity */
+	TEST_SYSTEM_RECOVERY = 4, /* RFC2544.26.5 - System recovery time */
+	TEST_RESET = 5,           /* RFC2544.26.6 - Reset time (informational) */
+	TEST_Y1564_CONFIG = 6,    /* ITU-T Y.1564 - Service Configuration Test */
+	TEST_Y1564_PERF = 7,      /* ITU-T Y.1564 - Service Performance Test */
+	TEST_Y1564_FULL = 8,      /* ITU-T Y.1564 - Both Config and Perf Tests */
+	TEST_COUNT = 9
 } test_type_t;
 
 /* Test state */
@@ -125,6 +130,120 @@ typedef struct {
 	uint32_t trials;       /* Number of trials performed */
 } burst_result_t;
 
+/* System recovery test result (Section 26.5) */
+typedef struct {
+	uint32_t frame_size;        /* Frame size tested */
+	double overload_rate_pct;   /* Overload rate (typically 110% of throughput) */
+	double recovery_rate_pct;   /* Recovery rate (typically 50% of throughput) */
+	uint32_t overload_sec;      /* Duration of overload in seconds */
+	double recovery_time_ms;    /* Time to recover from overload (milliseconds) */
+	uint64_t frames_lost;       /* Frames lost during recovery period */
+	uint32_t trials;            /* Number of trials performed */
+} recovery_result_t;
+
+/* Reset test result (Section 26.6) */
+typedef struct {
+	uint32_t frame_size;        /* Frame size tested */
+	double reset_time_ms;       /* Time for device to resume forwarding (ms) */
+	uint64_t frames_lost;       /* Frames lost during reset */
+	uint32_t trials;            /* Number of trials performed */
+	bool manual_reset;          /* True if reset was triggered manually */
+} reset_result_t;
+
+/* ============================================================================
+ * ITU-T Y.1564 (EtherSAM) Types
+ * ============================================================================
+ *
+ * Y.1564 tests services against SLA parameters rather than raw throughput.
+ * Two test phases:
+ * 1. Service Configuration Test - validates SLA at 25%, 50%, 75%, 100% of CIR
+ * 2. Service Performance Test - long-duration validation (15+ minutes)
+ *
+ * Supports up to 8 services tested simultaneously.
+ */
+
+/* Y.1564 Signature - 7 bytes, space-padded */
+#define Y1564_SIGNATURE "Y.1564 "
+#define Y1564_SIG_LEN 7
+#define Y1564_MAX_SERVICES 8
+#define Y1564_CONFIG_STEPS 4
+
+/* Y.1564 Service SLA Configuration */
+typedef struct {
+	double cir_mbps;          /* Committed Information Rate (Mbps) */
+	double eir_mbps;          /* Excess Information Rate (Mbps, 0 = none) */
+	uint32_t cbs_bytes;       /* Committed Burst Size (bytes) */
+	uint32_t ebs_bytes;       /* Excess Burst Size (bytes) */
+	double fd_threshold_ms;   /* Frame Delay threshold (milliseconds) */
+	double fdv_threshold_ms;  /* Frame Delay Variation threshold (ms) */
+	double flr_threshold_pct; /* Frame Loss Ratio threshold (%) */
+} y1564_sla_t;
+
+/* Y.1564 Service Configuration */
+typedef struct {
+	uint32_t service_id;      /* Service identifier (1-8) */
+	char service_name[32];    /* Human-readable name */
+	y1564_sla_t sla;          /* SLA parameters */
+	uint32_t frame_size;      /* Test frame size */
+	uint8_t cos;              /* Class of Service (DSCP value) */
+	bool enabled;             /* Service enabled for test */
+} y1564_service_t;
+
+/* Y.1564 Step Result (one step of Config test) */
+typedef struct {
+	uint32_t step;             /* Step number (1-4) */
+	double offered_rate_pct;   /* % of CIR (25, 50, 75, 100) */
+	double achieved_rate_mbps; /* Actual rate achieved */
+	uint64_t frames_tx;        /* Frames transmitted */
+	uint64_t frames_rx;        /* Frames received */
+	double flr_pct;            /* Frame Loss Ratio (%) */
+	double fd_avg_ms;          /* Average Frame Delay (ms) */
+	double fd_min_ms;          /* Minimum Frame Delay (ms) */
+	double fd_max_ms;          /* Maximum Frame Delay (ms) */
+	double fdv_ms;             /* Frame Delay Variation (ms) */
+	bool flr_pass;             /* FLR within threshold */
+	bool fd_pass;              /* FD within threshold */
+	bool fdv_pass;             /* FDV within threshold */
+	bool step_pass;            /* Overall step pass/fail */
+} y1564_step_result_t;
+
+/* Y.1564 Service Configuration Test Result */
+typedef struct {
+	uint32_t service_id;                        /* Service ID */
+	char service_name[32];                      /* Service name */
+	y1564_step_result_t steps[Y1564_CONFIG_STEPS]; /* 25%, 50%, 75%, 100% */
+	bool service_pass;                          /* All steps passed */
+} y1564_config_result_t;
+
+/* Y.1564 Service Performance Test Result */
+typedef struct {
+	uint32_t service_id;       /* Service ID */
+	char service_name[32];     /* Service name */
+	uint32_t duration_sec;     /* Test duration (seconds) */
+	uint64_t frames_tx;        /* Frames transmitted */
+	uint64_t frames_rx;        /* Frames received */
+	double flr_pct;            /* Frame Loss Ratio (%) */
+	double fd_avg_ms;          /* Average Frame Delay (ms) */
+	double fd_min_ms;          /* Minimum Frame Delay (ms) */
+	double fd_max_ms;          /* Maximum Frame Delay (ms) */
+	double fdv_ms;             /* Frame Delay Variation (ms) */
+	bool flr_pass;             /* FLR within threshold */
+	bool fd_pass;              /* FD within threshold */
+	bool fdv_pass;             /* FDV within threshold */
+	bool service_pass;         /* Overall service pass/fail */
+} y1564_perf_result_t;
+
+/* Y.1564 Test Configuration */
+typedef struct {
+	y1564_service_t services[Y1564_MAX_SERVICES]; /* Service configurations */
+	uint32_t service_count;                        /* Number of services (1-8) */
+	double config_steps[Y1564_CONFIG_STEPS];       /* Step percentages (default: 25,50,75,100) */
+	uint32_t step_duration_sec;                    /* Duration per step (default: 60s) */
+	uint32_t perf_duration_sec;                    /* Performance test duration (default: 900s) */
+	bool run_config_test;                          /* Run configuration test */
+	bool run_perf_test;                            /* Run performance test */
+} y1564_config_t;
+
 /* Test configuration */
 typedef struct {
 	/* Interface */
@@ -174,6 +293,9 @@ typedef struct {
 	/* Platform selection */
 	bool use_dpdk;            /* Use DPDK for packet I/O */
 	char *dpdk_args;          /* DPDK EAL arguments */
+
+	/* Y.1564 configuration */
+	y1564_config_t y1564;     /* Y.1564 test parameters */
 } rfc2544_config_t;
 
 /* Test context */
@@ -285,6 +407,96 @@ int rfc2544_frame_loss_test(rfc2544_ctx_t *ctx, uint32_t frame_size, frame_loss_
  */
 int rfc2544_back_to_back_test(rfc2544_ctx_t *ctx, uint32_t frame_size, burst_result_t *result);
 
+/**
+ * Run system recovery test (Section 26.5)
+ * Measures time to recover from overload condition
+ * @param ctx Test context
+ * @param frame_size Frame size to test
+ * @param throughput_pct Known throughput rate from throughput test
+ * @param overload_sec Duration of overload condition in seconds
+ * @param result Result structure (caller allocates)
+ * @return 0 on success, negative on error
+ */
+int rfc2544_system_recovery_test(rfc2544_ctx_t *ctx, uint32_t frame_size,
+                                 double throughput_pct, uint32_t overload_sec,
+                                 recovery_result_t *result);
+
+/**
+ * Run reset test (Section 26.6) - Informational
+ * Measures time for device to resume forwarding after reset
+ * NOTE: This test requires external reset trigger (manual or automated)
+ * @param ctx Test context
+ * @param frame_size Frame size to test
+ * @param result Result structure (caller allocates)
+ * @return 0 on success, negative on error
+ */
+int rfc2544_reset_test(rfc2544_ctx_t *ctx, uint32_t frame_size, reset_result_t *result);
+
+/* ============================================================================
+ * ITU-T Y.1564 Test Functions
+ * ============================================================================ */
+
+/**
+ * Run Y.1564 Service Configuration Test
+ * Tests service at 25%, 50%, 75%, 100% of CIR
+ * @param ctx Test context
+ * @param service Service configuration with SLA parameters
+ * @param result Result structure (caller allocates)
+ * @return 0 on success, negative on error
+ */
+int y1564_config_test(rfc2544_ctx_t *ctx, const y1564_service_t *service,
+                      y1564_config_result_t *result);
+
+/**
+ * Run Y.1564 Service Performance Test
+ * Long-duration test at CIR (default 15 minutes)
+ * @param ctx Test context
+ * @param service Service configuration with SLA parameters
+ * @param duration_sec Test duration in seconds
+ * @param result Result structure (caller allocates)
+ * @return 0 on success, negative on error
+ */
+int y1564_perf_test(rfc2544_ctx_t *ctx, const y1564_service_t *service,
+                    uint32_t duration_sec, y1564_perf_result_t *result);
+
+/**
+ * Run Y.1564 Multi-Service Test
+ * Tests multiple services simultaneously (up to 8)
+ * @param ctx Test context
+ * @param services Array of service configurations
+ * @param service_count Number of services (1-8)
+ * @param config_results Array of config results (caller allocates, size = service_count)
+ * @param perf_results Array of perf results (caller allocates, size = service_count)
+ * @return 0 on success, negative on error
+ */
+int y1564_multi_service_test(rfc2544_ctx_t *ctx, const y1564_service_t *services,
+                             uint32_t service_count,
+                             y1564_config_result_t *config_results,
+                             y1564_perf_result_t *perf_results);
+
+/**
+ * Get default Y.1564 configuration
+ * @param config Configuration to populate with defaults
+ */
+void y1564_default_config(y1564_config_t *config);
+
+/**
+ * Get default Y.1564 SLA (typical voice service)
+ * @param sla SLA structure to populate
+ */
+void y1564_default_sla(y1564_sla_t *sla);
+
+/**
+ * Print Y.1564 test results
+ * @param config_results Array of config test results
+ * @param perf_results Array of perf test results
+ * @param service_count Number of services
+ * @param format Output format (TEXT, JSON, CSV)
+ */
+void y1564_print_results(const y1564_config_result_t *config_results,
+                         const y1564_perf_result_t *perf_results,
+                         uint32_t service_count, stats_format_t format);
+
 /* ============================================================================
  * Utility Functions
  * ============================================================================ */
@@ -361,6 +573,43 @@ void rfc2544_print_results(const rfc2544_ctx_t *ctx);
 /* Calculate payload size for a given frame size */
 #define RFC2544_PAYLOAD_SIZE(frame_size) ((frame_size) - 14 - 20 - 8 - 4)
 /* 14=ETH, 20=IP, 8=UDP, 4=FCS */
+
+/* ============================================================================
+ * Y.1564 Packet Structure
+ * ============================================================================
+ *
+ * Y.1564 packets use the same structure as RFC2544, with a different signature.
+ * The reflector already supports "Y.1564 " signature (7 bytes, space-padded).
+ *
+ * Packet layout (after Ethernet + IP + UDP headers):
+ *
+ * Offset  Size    Field
+ * ------  ----    -----
+ * 0       7       Signature ("Y.1564 ")
+ * 7       4       Sequence number (uint32_t, network order)
+ * 11      8       TX timestamp (uint64_t nanoseconds, network order)
+ * 19      4       Service ID (uint32_t, 1-8 for multi-service)
+ * 23      1       Flags (bit 0: request timestamp, bit 1: is response)
+ * 24      N       Padding to reach frame size
+ *
+ * DSCP is set in the IP header ToS field for CoS marking.
+ */
+
+#define Y1564_PAYLOAD_OFFSET 0
+#define Y1564_SEQNUM_OFFSET 7
+#define Y1564_TIMESTAMP_OFFSET 11
+#define Y1564_SERVICEID_OFFSET 19
+#define Y1564_FLAGS_OFFSET 23
+#define Y1564_PADDING_OFFSET 24
+
+#define Y1564_FLAG_REQ_TIMESTAMP 0x01
+#define Y1564_FLAG_IS_RESPONSE 0x02
+
+#define Y1564_MIN_PAYLOAD 24
+#define Y1564_MIN_FRAME 64
+
+/* Calculate payload size for Y.1564 */
+#define Y1564_PAYLOAD_SIZE(frame_size) ((frame_size) - 14 - 20 - 8 - 4)
 
 #ifdef __cplusplus
 }

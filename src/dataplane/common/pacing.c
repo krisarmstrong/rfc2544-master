@@ -23,6 +23,7 @@
 
 struct pacing_ctx {
 	/* Target rate */
+	uint64_t line_rate_bps;   /* Original line rate (for rate changes) */
 	uint64_t target_pps;      /* Target packets per second */
 	uint64_t target_bps;      /* Target bits per second */
 	uint32_t frame_size;      /* Frame size for rate calculation */
@@ -107,6 +108,7 @@ pacing_ctx_t *pacing_create(uint64_t line_rate_bps, uint32_t frame_size, double 
 	if (!ctx)
 		return NULL;
 
+	ctx->line_rate_bps = line_rate_bps; /* Store for rate changes */
 	ctx->frame_size = frame_size;
 	ctx->enabled = true;
 	ctx->use_busy_wait = false; /* Default to sleep-based for CPU efficiency */
@@ -141,15 +143,19 @@ pacing_ctx_t *pacing_create(uint64_t line_rate_bps, uint32_t frame_size, double 
  */
 void pacing_set_rate(pacing_ctx_t *ctx, double rate_pct)
 {
-	if (!ctx)
+	if (!ctx || rate_pct <= 0.0 || rate_pct > 100.0)
 		return;
 
 	uint32_t wire_size = ctx->frame_size + 20;
-	ctx->target_pps = (uint64_t)((ctx->target_bps / rate_pct * 100.0) * rate_pct / 100.0) /
-	                  (wire_size * 8);
+
+	/* Recalculate target rates from stored line rate */
+	ctx->target_bps = (uint64_t)(ctx->line_rate_bps * rate_pct / 100.0);
+	ctx->target_pps = ctx->target_bps / (wire_size * 8);
 
 	if (ctx->target_pps > 0) {
 		ctx->interval_ns = NS_PER_SEC / ctx->target_pps;
+	} else {
+		ctx->interval_ns = NS_PER_SEC; /* 1 pps minimum */
 	}
 }
 

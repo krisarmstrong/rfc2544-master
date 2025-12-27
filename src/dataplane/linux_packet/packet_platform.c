@@ -6,6 +6,7 @@
  */
 
 #include "rfc2544.h"
+#include "rfc2544_internal.h"
 #include "platform_config.h"
 
 #if PLATFORM_LINUX
@@ -14,6 +15,8 @@
 #include <errno.h>
 #include <linux/if_ether.h>
 #include <linux/if_packet.h>
+#include <linux/net_tstamp.h>
+#include <linux/sockios.h>
 #include <net/if.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,19 +27,7 @@
 #include <time.h>
 #include <unistd.h>
 
-/* Forward declarations */
-typedef struct rfc2544_ctx rfc2544_ctx_t;
-typedef struct {
-	int worker_id;
-	int queue_id;
-	void *pctx;
-	uint64_t tx_packets;
-	uint64_t tx_bytes;
-	uint64_t rx_packets;
-	uint64_t rx_bytes;
-	uint64_t tx_errors;
-	uint64_t rx_errors;
-} worker_ctx_t;
+/* worker_ctx_t and rfc2544_ctx_t are defined in rfc2544_internal.h */
 
 typedef struct {
 	uint8_t *data;
@@ -62,9 +53,112 @@ typedef struct {
 	void *rx_ring;
 	void *tx_ring;
 	size_t ring_size;
+
+	/* Hardware timestamping */
+	bool hw_timestamp_enabled;  /* HW timestamping available */
+	bool hw_timestamp_tx;       /* TX hardware timestamps */
+	bool hw_timestamp_rx;       /* RX hardware timestamps */
 } platform_ctx_t;
 
 #define BUFFER_SIZE 65536
+
+/* Control message buffer for timestamps */
+#define CMSG_BUFFER_SIZE 256
+
+/* ============================================================================
+ * Hardware Timestamping Setup
+ * ============================================================================ */
+
+/**
+ * Enable hardware timestamping on the NIC
+ * Returns 0 on success, negative on error
+ */
+static int enable_hw_timestamping(platform_ctx_t *pctx, const char *ifname)
+{
+	struct ifreq ifr;
+	struct hwtstamp_config hwconfig;
+
+	memset(&ifr, 0, sizeof(ifr));
+	memset(&hwconfig, 0, sizeof(hwconfig));
+
+	strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
+	ifr.ifr_name[IFNAMSIZ - 1] = '\0'; /* Ensure null-termination */
+
+	/* Request hardware TX and RX timestamps */
+	hwconfig.tx_type = HWTSTAMP_TX_ON;
+	hwconfig.rx_filter = HWTSTAMP_FILTER_ALL;
+
+	ifr.ifr_data = (void *)&hwconfig;
+
+	if (ioctl(pctx->sock_fd, SIOCSHWTSTAMP, &ifr) < 0) {
+		/* Hardware timestamping not supported - fall back to software */
+		fprintf(stderr, "[packet] HW timestamping not available: %s (using software timestamps)\n",
+		        strerror(errno));
+		return -1;
+	}
+
+	/* Enable socket-level timestamping */
+	int timestamping_flags = SOF_TIMESTAMPING_RX_HARDWARE |
+	                         SOF_TIMESTAMPING_TX_HARDWARE |
+	                         SOF_TIMESTAMPING_RAW_HARDWARE |
+	                         SOF_TIMESTAMPING_SOFTWARE |
+	                         SOF_TIMESTAMPING_RX_SOFTWARE |
+	                         SOF_TIMESTAMPING_TX_SOFTWARE;
+
+	if (setsockopt(pctx->sock_fd, SOL_SOCKET, SO_TIMESTAMPING,
+	               &timestamping_flags, sizeof(timestamping_flags)) < 0) {
+		fprintf(stderr, "[packet] SO_TIMESTAMPING failed: %s\n", strerror(errno));
+		return -1;
+	}
+
+	pctx->hw_timestamp_enabled = true;
+	pctx->hw_timestamp_tx = (hwconfig.tx_type == HWTSTAMP_TX_ON);
+	pctx->hw_timestamp_rx = (hwconfig.rx_filter != HWTSTAMP_FILTER_NONE);
+
+	fprintf(stderr, "[packet] Hardware timestamping enabled (TX=%s, RX=%s)\n",
+	        pctx->hw_timestamp_tx ? "yes" : "no",
+	        pctx->hw_timestamp_rx ? "yes" : "no");
+
+	return 0;
+}
+
+/**
+ * Extract timestamp from socket control messages
+ * Returns timestamp in nanoseconds, or software timestamp if HW not available
+ */
+static uint64_t extract_timestamp(struct msghdr *msg, bool prefer_hw)
+{
+	struct cmsghdr *cmsg;
+	uint64_t hw_timestamp = 0;
+	uint64_t sw_timestamp = 0;
+
+	for (cmsg = CMSG_FIRSTHDR(msg); cmsg; cmsg = CMSG_NXTHDR(msg, cmsg)) {
+		if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SO_TIMESTAMPING) {
+			struct timespec *ts = (struct timespec *)CMSG_DATA(cmsg);
+
+			/* ts[0] = software timestamp
+			 * ts[1] = deprecated (hw_timestamp transformed)
+			 * ts[2] = raw hardware timestamp */
+			sw_timestamp = (uint64_t)ts[0].tv_sec * 1000000000ULL + ts[0].tv_nsec;
+			hw_timestamp = (uint64_t)ts[2].tv_sec * 1000000000ULL + ts[2].tv_nsec;
+		}
+	}
+
+	/* Prefer hardware timestamp if available and requested */
+	if (prefer_hw && hw_timestamp > 0) {
+		return hw_timestamp;
+	}
+
+	/* Fall back to software timestamp */
+	if (sw_timestamp > 0) {
+		return sw_timestamp;
+	}
+
+	/* Last resort: get current time */
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+}
 
 /* ============================================================================
  * Platform Operations
@@ -108,7 +202,9 @@ static int packet_init(rfc2544_ctx_t *ctx, worker_ctx_t *wctx)
 
 	/* Get interface MAC address */
 	struct ifreq ifr;
+	memset(&ifr, 0, sizeof(ifr));
 	strncpy(ifr.ifr_name, ctx->config.interface, IFNAMSIZ - 1);
+	ifr.ifr_name[IFNAMSIZ - 1] = '\0'; /* Ensure null-termination */
 	if (ioctl(pctx->sock_fd, SIOCGIFHWADDR, &ifr) < 0) {
 		perror("ioctl SIOCGIFHWADDR");
 		close(pctx->sock_fd);
@@ -143,9 +239,15 @@ static int packet_init(rfc2544_ctx_t *ctx, worker_ctx_t *wctx)
 	memcpy(ctx->local_mac, pctx->if_mac, 6);
 	wctx->pctx = pctx;
 
-	fprintf(stderr, "[packet] Initialized on %s (ifindex=%d, MAC=%02x:%02x:%02x:%02x:%02x:%02x)\n",
+	/* Try to enable hardware timestamping if requested */
+	if (ctx->config.hw_timestamp) {
+		enable_hw_timestamping(pctx, ctx->config.interface);
+	}
+
+	fprintf(stderr, "[packet] Initialized on %s (ifindex=%d, MAC=%02x:%02x:%02x:%02x:%02x:%02x, HW-TS=%s)\n",
 	        ctx->config.interface, pctx->if_index, pctx->if_mac[0], pctx->if_mac[1],
-	        pctx->if_mac[2], pctx->if_mac[3], pctx->if_mac[4], pctx->if_mac[5]);
+	        pctx->if_mac[2], pctx->if_mac[3], pctx->if_mac[4], pctx->if_mac[5],
+	        pctx->hw_timestamp_enabled ? "enabled" : "disabled");
 
 	return 0;
 }
@@ -204,12 +306,28 @@ static int packet_recv_batch(worker_ctx_t *wctx, packet_t *pkts, int max_count)
 	tv.tv_usec = 1000; /* 1ms timeout */
 	setsockopt(pctx->sock_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
+	/* Control message buffer for timestamps */
+	char cmsg_buf[CMSG_BUFFER_SIZE];
+
 	for (int i = 0; i < max_count; i++) {
 		struct sockaddr_ll from;
-		socklen_t fromlen = sizeof(from);
+		struct iovec iov;
+		struct msghdr msg;
+		ssize_t ret;
 
-		ssize_t ret = recvfrom(pctx->sock_fd, pctx->rx_buffer, pctx->buffer_size, 0,
-		                       (struct sockaddr *)&from, &fromlen);
+		/* Setup message header for recvmsg (to receive timestamps) */
+		iov.iov_base = pctx->rx_buffer;
+		iov.iov_len = pctx->buffer_size;
+
+		memset(&msg, 0, sizeof(msg));
+		msg.msg_name = &from;
+		msg.msg_namelen = sizeof(from);
+		msg.msg_iov = &iov;
+		msg.msg_iovlen = 1;
+		msg.msg_control = cmsg_buf;
+		msg.msg_controllen = sizeof(cmsg_buf);
+
+		ret = recvmsg(pctx->sock_fd, &msg, 0);
 
 		if (ret < 0) {
 			if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -224,16 +342,22 @@ static int packet_recv_batch(worker_ctx_t *wctx, packet_t *pkts, int max_count)
 			continue;
 		}
 
-		/* Get timestamp */
-		struct timespec ts;
-		clock_gettime(CLOCK_MONOTONIC, &ts);
+		/* Get timestamp (prefer HW if available) */
+		uint64_t timestamp;
+		if (pctx->hw_timestamp_enabled) {
+			timestamp = extract_timestamp(&msg, pctx->hw_timestamp_rx);
+		} else {
+			struct timespec ts;
+			clock_gettime(CLOCK_MONOTONIC, &ts);
+			timestamp = (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+		}
 
 		/* Fill packet structure */
 		pkts[received].data = malloc(ret);
 		if (pkts[received].data) {
 			memcpy(pkts[received].data, pctx->rx_buffer, ret);
 			pkts[received].len = ret;
-			pkts[received].timestamp = ts.tv_sec * NS_PER_SEC + ts.tv_nsec;
+			pkts[received].timestamp = timestamp;
 			received++;
 			wctx->rx_packets++;
 			wctx->rx_bytes += ret;

@@ -52,15 +52,112 @@ type Result struct {
 	Timestamp    int64   `json:"timestamp"`
 }
 
+// Status constants for test state
+const (
+	StatusIdle     = "idle"
+	StatusRunning  = "running"
+	StatusComplete = "complete"
+	StatusError    = "error"
+	StatusCancelled = "cancelled"
+)
+
 // Config for test execution
 type Config struct {
-	Interface      string  `json:"interface"`
-	TestType       string  `json:"test_type"`
-	FrameSize      uint32  `json:"frame_size"`
-	IncludeJumbo   bool    `json:"include_jumbo"`
-	TrialDuration  int     `json:"trial_duration_sec"`
-	InitialRatePct float64 `json:"initial_rate_pct"`
-	ResolutionPct  float64 `json:"resolution_pct"`
+	Interface      string        `json:"interface"`
+	TestType       int           `json:"test_type"`
+	FrameSize      uint32        `json:"frame_size"`
+	IncludeJumbo   bool          `json:"include_jumbo"`
+	TrialDuration  time.Duration `json:"trial_duration"`
+	LineRateMbps   uint64        `json:"line_rate_mbps"`
+	HWTimestamp    bool          `json:"hw_timestamp"`
+	InitialRatePct float64       `json:"initial_rate_pct"`
+	ResolutionPct  float64       `json:"resolution_pct"`
+
+	// Y.1564 specific configuration
+	Y1564 *Y1564Config `json:"y1564,omitempty"`
+}
+
+// TestResult for generic test results
+type TestResult struct {
+	TestType  string                 `json:"test_type"`
+	FrameSize uint32                 `json:"frame_size"`
+	Data      map[string]interface{} `json:"data"`
+	Timestamp int64                  `json:"timestamp"`
+}
+
+// Y1564Config for Y.1564 test configuration
+type Y1564Config struct {
+	Services        []Y1564Service `json:"services"`
+	ConfigSteps     []float64      `json:"config_steps"`
+	StepDurationSec int            `json:"step_duration_sec"`
+	PerfDurationMin int            `json:"perf_duration_min"`
+	RunConfigTest   bool           `json:"run_config_test"`
+	RunPerfTest     bool           `json:"run_perf_test"`
+}
+
+// Y1564Service for Y.1564 service definition
+type Y1564Service struct {
+	ServiceID   uint32    `json:"service_id"`
+	ServiceName string    `json:"service_name"`
+	FrameSize   uint32    `json:"frame_size"`
+	CoS         uint8     `json:"cos"`
+	Enabled     bool      `json:"enabled"`
+	SLA         Y1564SLA  `json:"sla"`
+}
+
+// Y1564SLA for Y.1564 SLA parameters
+type Y1564SLA struct {
+	CIRMbps         float64 `json:"cir_mbps"`
+	EIRMbps         float64 `json:"eir_mbps"`
+	CBSBytes        uint32  `json:"cbs_bytes"`
+	EBSBytes        uint32  `json:"ebs_bytes"`
+	FDThresholdMs   float64 `json:"fd_threshold_ms"`
+	FDVThresholdMs  float64 `json:"fdv_threshold_ms"`
+	FLRThresholdPct float64 `json:"flr_threshold_pct"`
+}
+
+// Y1564StepResult for Y.1564 step test results
+type Y1564StepResult struct {
+	Step            uint32  `json:"step"`
+	OfferedRatePct  float64 `json:"offered_rate_pct"`
+	AchievedRateMbps float64 `json:"achieved_rate_mbps"`
+	FramesTx        uint64  `json:"frames_tx"`
+	FramesRx        uint64  `json:"frames_rx"`
+	FLRPct          float64 `json:"flr_pct"`
+	FDAvgMs         float64 `json:"fd_avg_ms"`
+	FDMinMs         float64 `json:"fd_min_ms"`
+	FDMaxMs         float64 `json:"fd_max_ms"`
+	FDVMs           float64 `json:"fdv_ms"`
+	FLRPass         bool    `json:"flr_pass"`
+	FDPass          bool    `json:"fd_pass"`
+	FDVPass         bool    `json:"fdv_pass"`
+	StepPass        bool    `json:"step_pass"`
+}
+
+// Y1564ConfigResult for Y.1564 configuration test results
+type Y1564ConfigResult struct {
+	ServiceID   uint32            `json:"service_id"`
+	ServiceName string            `json:"service_name"`
+	Steps       []Y1564StepResult `json:"steps"`
+	ServicePass bool              `json:"service_pass"`
+}
+
+// Y1564PerfResult for Y.1564 performance test results
+type Y1564PerfResult struct {
+	ServiceID   uint32  `json:"service_id"`
+	ServiceName string  `json:"service_name"`
+	DurationSec uint32  `json:"duration_sec"`
+	FramesTx    uint64  `json:"frames_tx"`
+	FramesRx    uint64  `json:"frames_rx"`
+	FLRPct      float64 `json:"flr_pct"`
+	FDAvgMs     float64 `json:"fd_avg_ms"`
+	FDMinMs     float64 `json:"fd_min_ms"`
+	FDMaxMs     float64 `json:"fd_max_ms"`
+	FDVMs       float64 `json:"fdv_ms"`
+	FLRPass     bool    `json:"flr_pass"`
+	FDPass      bool    `json:"fd_pass"`
+	FDVPass     bool    `json:"fdv_pass"`
+	ServicePass bool    `json:"service_pass"`
 }
 
 // Server represents the web server
@@ -71,7 +168,11 @@ type Server struct {
 	mu      sync.RWMutex
 	stats   Stats
 	results []Result
+	testResults []TestResult
 	config  Config
+	status  string
+	statusMsg string
+	progress float64
 
 	// Embedded UI (optional)
 	uiFS fs.FS
@@ -138,9 +239,13 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
     <style>
         body { font-family: system-ui, sans-serif; background: #1a1a2e; color: #eee; margin: 40px; }
         h1 { color: #0f0; }
+        h2 { color: #4da6ff; }
+        h3 { color: #8f8; margin-top: 20px; }
         .card { background: #16213e; padding: 20px; border-radius: 8px; margin: 10px 0; }
-        pre { background: #0f0f23; padding: 10px; border-radius: 4px; overflow-x: auto; }
+        pre { background: #0f0f23; padding: 10px; border-radius: 4px; overflow-x: auto; font-size: 13px; }
         a { color: #4da6ff; }
+        ul { margin: 10px 0; }
+        li { margin: 5px 0; }
     </style>
 </head>
 <body>
@@ -158,13 +263,70 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
         </ul>
     </div>
     <div class="card">
-        <h2>Start Test</h2>
+        <h2>RFC 2544 Tests</h2>
+        <h3>Throughput Test</h3>
         <pre>curl -X POST http://localhost%s/api/start \
   -H "Content-Type: application/json" \
   -d '{"interface":"eth0","test_type":"throughput","frame_size":1518}'</pre>
     </div>
+    <div class="card">
+        <h2>ITU-T Y.1564 (EtherSAM) Tests</h2>
+        <p>Y.1564 tests services against SLA parameters (CIR, FD, FDV, FLR)</p>
+        <h3>Test Types</h3>
+        <ul>
+            <li><b>y1564_config</b> - Service Configuration Test (step test at 25%%, 50%%, 75%%, 100%% CIR)</li>
+            <li><b>y1564_perf</b> - Service Performance Test (sustained traffic at CIR)</li>
+            <li><b>y1564</b> - Full test (both config and perf phases)</li>
+        </ul>
+        <h3>Single Service Y.1564 Test</h3>
+        <pre>curl -X POST http://localhost%s/api/start \
+  -H "Content-Type: application/json" \
+  -d '{
+    "interface": "eth0",
+    "test_type": "y1564",
+    "y1564": {
+      "services": [{
+        "service_id": 1,
+        "service_name": "Voice",
+        "frame_size": 128,
+        "cos": 46,
+        "enabled": true,
+        "sla": {
+          "cir_mbps": 10,
+          "eir_mbps": 0,
+          "fd_threshold_ms": 10,
+          "fdv_threshold_ms": 5,
+          "flr_threshold_pct": 0.01
+        }
+      }],
+      "config_steps": [25, 50, 75, 100],
+      "step_duration_sec": 60,
+      "perf_duration_min": 15,
+      "run_config_test": true,
+      "run_perf_test": true
+    }
+  }'</pre>
+        <h3>Multi-Service Y.1564 Test</h3>
+        <pre>curl -X POST http://localhost%s/api/start \
+  -H "Content-Type: application/json" \
+  -d '{
+    "interface": "eth0",
+    "test_type": "y1564",
+    "y1564": {
+      "services": [
+        {"service_id": 1, "service_name": "Voice", "frame_size": 128, "cos": 46, "enabled": true,
+         "sla": {"cir_mbps": 10, "fd_threshold_ms": 10, "fdv_threshold_ms": 5, "flr_threshold_pct": 0.01}},
+        {"service_id": 2, "service_name": "Video", "frame_size": 1518, "cos": 34, "enabled": true,
+         "sla": {"cir_mbps": 100, "eir_mbps": 50, "fd_threshold_ms": 50, "fdv_threshold_ms": 30, "flr_threshold_pct": 0.1}},
+        {"service_id": 3, "service_name": "Data", "frame_size": 1518, "cos": 0, "enabled": true,
+         "sla": {"cir_mbps": 500, "eir_mbps": 200, "fd_threshold_ms": 100, "fdv_threshold_ms": 50, "flr_threshold_pct": 0.5}}
+      ],
+      "perf_duration_min": 15
+    }
+  }'</pre>
+    </div>
 </body>
-</html>`, s.addr)
+</html>`, s.addr, s.addr, s.addr)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -280,10 +442,29 @@ func (s *Server) UpdateStats(stats Stats) {
 	s.mu.Unlock()
 }
 
-// AddResult adds a test result
-func (s *Server) AddResult(result Result) {
+// AddResult adds a test result (legacy)
+func (s *Server) AddLegacyResult(result Result) {
 	s.mu.Lock()
 	s.results = append(s.results, result)
+	s.mu.Unlock()
+}
+
+// AddResult adds a generic test result
+func (s *Server) AddResult(result TestResult) {
+	result.Timestamp = time.Now().Unix()
+	s.mu.Lock()
+	s.testResults = append(s.testResults, result)
+	s.mu.Unlock()
+}
+
+// UpdateStatus updates the test status
+func (s *Server) UpdateStatus(status, message string, progress float64) {
+	s.mu.Lock()
+	s.status = status
+	s.statusMsg = message
+	s.progress = progress
+	s.stats.State = status
+	s.stats.Progress = progress
 	s.mu.Unlock()
 }
 
@@ -291,6 +472,7 @@ func (s *Server) AddResult(result Result) {
 func (s *Server) ClearResults() {
 	s.mu.Lock()
 	s.results = s.results[:0]
+	s.testResults = s.testResults[:0]
 	s.mu.Unlock()
 }
 
