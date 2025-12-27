@@ -28,6 +28,7 @@
 #include <linux/sockios.h>
 #endif
 
+#ifdef __linux__
 /**
  * Read sysfs value as string
  */
@@ -71,7 +72,6 @@ static int read_sysfs_u64(const char *path, uint64_t *value)
  */
 static bool check_xdp_support(const char *interface)
 {
-#ifdef __linux__
 	/* Check for XDP support by looking for driver XDP capability */
 	char path[256];
 	snprintf(path, sizeof(path), "/sys/class/net/%s/device/driver", interface);
@@ -102,9 +102,7 @@ static bool check_xdp_support(const char *interface)
 		if (strstr(driver_name, xdp_drivers[i]))
 			return true;
 	}
-#else
-	(void)interface;
-#endif
+
 	return false;
 }
 
@@ -113,7 +111,6 @@ static bool check_xdp_support(const char *interface)
  */
 static bool check_hw_timestamp_support(const char *interface)
 {
-#ifdef __linux__
 	int fd = socket(AF_INET, SOCK_DGRAM, 0);
 	if (fd < 0)
 		return false;
@@ -137,11 +134,8 @@ static bool check_hw_timestamp_support(const char *interface)
 
 	close(fd);
 	return supported;
-#else
-	(void)interface;
-	return false;
-#endif
 }
+#endif /* __linux__ */
 
 /**
  * Detect NIC capabilities

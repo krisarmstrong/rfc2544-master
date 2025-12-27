@@ -102,7 +102,7 @@ extern bool rfc2544_is_cancelled(const rfc2544_ctx_t *ctx);
 
 /* Logging (from core.c) */
 extern void rfc2544_log_internal(int level, const char *fmt, ...);
-#define y1564_log(level, fmt, ...) rfc2544_log_internal(level, "[Y.1564] " fmt, ##__VA_ARGS__)
+#define y1564_log(level, ...) rfc2544_log_internal(level, "[Y.1564] " __VA_ARGS__)
 
 /* ============================================================================
  * Utility Functions

@@ -1388,8 +1388,9 @@ void rfc2544_print_results(const rfc2544_ctx_t *ctx)
 		printf("-----------------------------------------------------------------\n");
 		for (uint32_t i = 0; i < ctx->loss_count; i++) {
 			const frame_loss_point_t *r = &ctx->loss_results[i];
-			printf("%11.1f%% %15lu %15lu %11.4f%%\n", r->offered_rate_pct, r->frames_sent,
-			       r->frames_recv, r->loss_pct);
+			printf("%11.1f%% %15llu %15llu %11.4f%%\n", r->offered_rate_pct,
+			       (unsigned long long)r->frames_sent,
+			       (unsigned long long)r->frames_recv, r->loss_pct);
 		}
 		printf("\n");
 	}
@@ -1403,8 +1404,8 @@ void rfc2544_print_results(const rfc2544_ctx_t *ctx)
 		printf("-----------------------------------------------------------------\n");
 		for (uint32_t i = 0; i < ctx->burst_count; i++) {
 			const burst_result_t *r = &ctx->burst_results[i];
-			printf("%-10u %15lu %15.1f %10u\n", r->frame_size, r->max_burst,
-			       r->burst_duration, r->trials);
+			printf("%-10u %15llu %15.1f %10u\n", r->frame_size,
+			       (unsigned long long)r->max_burst, r->burst_duration, r->trials);
 		}
 		printf("\n");
 	}
