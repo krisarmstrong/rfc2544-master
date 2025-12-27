@@ -33,7 +33,12 @@ COMMON_SRCS := src/dataplane/common/core.c \
                src/dataplane/common/ipv6.c \
                src/dataplane/common/nic_detect.c \
                src/dataplane/common/color.c \
-               src/dataplane/common/multiport.c
+               src/dataplane/common/multiport.c \
+               src/dataplane/common/rfc2889.c \
+               src/dataplane/common/rfc6349.c \
+               src/dataplane/common/y1731.c \
+               src/dataplane/common/mef.c \
+               src/dataplane/common/tsn.c
 
 # Platform-specific sources
 ifeq ($(UNAME),Linux)
