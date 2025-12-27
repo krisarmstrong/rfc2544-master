@@ -244,6 +244,152 @@ typedef struct {
 	bool run_perf_test;                            /* Run performance test */
 } y1564_config_t;
 
+/* ============================================================================
+ * IMIX (Internet Mix) Types
+ * ============================================================================
+ *
+ * IMIX profiles simulate realistic Internet traffic patterns using weighted
+ * distributions of frame sizes instead of fixed sizes.
+ */
+
+/* IMIX profile types */
+typedef enum {
+	IMIX_NONE = 0,           /* Use fixed frame sizes */
+	IMIX_SIMPLE = 1,         /* 7:4:1 ratio of 64:570:1518 bytes */
+	IMIX_CISCO = 2,          /* Cisco standard: 7x64, 4x594, 1x1518 */
+	IMIX_TOLLY = 3,          /* Tolly Group profile */
+	IMIX_IPSEC = 4,          /* IPSec-heavy traffic profile */
+	IMIX_CUSTOM = 5          /* User-defined distribution */
+} imix_profile_t;
+
+/* IMIX frame distribution entry */
+typedef struct {
+	uint32_t frame_size;     /* Frame size in bytes */
+	double weight;           /* Weight (percentage or ratio) */
+} imix_entry_t;
+
+#define IMIX_MAX_ENTRIES 16
+
+/* IMIX configuration */
+typedef struct {
+	imix_profile_t profile;              /* Profile type */
+	uint32_t entry_count;                /* Number of entries in custom profile */
+	imix_entry_t entries[IMIX_MAX_ENTRIES]; /* Custom frame size distribution */
+} imix_config_t;
+
+/* IMIX result (aggregate of all frame sizes) */
+typedef struct {
+	double avg_frame_size;               /* Weighted average frame size */
+	double throughput_mbps;              /* Achieved throughput */
+	double frame_rate_fps;               /* Achieved frame rate */
+	uint64_t total_frames_tx;            /* Total frames transmitted */
+	uint64_t total_frames_rx;            /* Total frames received */
+	double loss_pct;                     /* Overall frame loss */
+	double latency_avg_ms;               /* Average latency */
+	double latency_min_ms;               /* Minimum latency */
+	double latency_max_ms;               /* Maximum latency */
+	double jitter_ms;                    /* Jitter (FDV) */
+} imix_result_t;
+
+/* ============================================================================
+ * Bidirectional Testing Types
+ * ============================================================================
+ */
+
+/* Bidirectional test mode */
+typedef enum {
+	BIDIR_NONE = 0,          /* Unidirectional (default) */
+	BIDIR_SYMMETRIC = 1,     /* Same rate both directions */
+	BIDIR_ASYMMETRIC = 2     /* Different rates per direction */
+} bidir_mode_t;
+
+/* Bidirectional result */
+typedef struct {
+	throughput_result_t tx_result;  /* TX direction results */
+	throughput_result_t rx_result;  /* RX direction results */
+	double aggregate_mbps;          /* Combined throughput */
+} bidir_result_t;
+
+/* ============================================================================
+ * Multi-Port Testing Types
+ * ============================================================================
+ */
+
+#define MAX_TEST_PORTS 8
+
+/* Port configuration */
+typedef struct {
+	char interface[64];      /* Interface name */
+	uint8_t src_mac[6];      /* Source MAC */
+	uint8_t dst_mac[6];      /* Destination MAC */
+	uint32_t src_ip;         /* Source IP */
+	uint32_t dst_ip;         /* Destination IP */
+	uint16_t src_port;       /* Source UDP port */
+	uint16_t dst_port;       /* Destination UDP port */
+	double rate_pct;         /* Rate percentage of line rate */
+	bool enabled;            /* Port enabled */
+} port_config_t;
+
+/* Multi-port configuration */
+typedef struct {
+	uint32_t port_count;               /* Number of ports */
+	port_config_t ports[MAX_TEST_PORTS]; /* Port configurations */
+	bool aggregate_results;            /* Aggregate or per-port results */
+} multiport_config_t;
+
+/* ============================================================================
+ * IPv6 Testing Types (RFC 5180)
+ * ============================================================================
+ */
+
+/* IPv6 test mode */
+typedef enum {
+	IP_MODE_V4 = 0,          /* IPv4 only (default) */
+	IP_MODE_V6 = 1,          /* IPv6 only */
+	IP_MODE_DUAL = 2         /* Dual-stack (both) */
+} ip_mode_t;
+
+/* IPv6 configuration */
+typedef struct {
+	uint8_t src_addr[16];    /* Source IPv6 address */
+	uint8_t dst_addr[16];    /* Destination IPv6 address */
+	uint8_t traffic_class;   /* Traffic class (DSCP) */
+	uint32_t flow_label;     /* Flow label */
+	uint8_t hop_limit;       /* Hop limit (TTL equivalent) */
+} ipv6_config_t;
+
+/* ============================================================================
+ * Y.1564 Color-Aware Metering Types
+ * ============================================================================
+ */
+
+/* MEF color marking */
+typedef enum {
+	COLOR_GREEN = 0,         /* Within CIR */
+	COLOR_YELLOW = 1,        /* Between CIR and CIR+EIR */
+	COLOR_RED = 2            /* Above CIR+EIR (drop) */
+} traffic_color_t;
+
+/* Color-aware metering result */
+typedef struct {
+	uint64_t green_frames;   /* Frames within CIR */
+	uint64_t yellow_frames;  /* Frames in EIR */
+	uint64_t red_frames;     /* Frames dropped (above EIR) */
+	double green_pct;        /* Percentage green */
+	double yellow_pct;       /* Percentage yellow */
+	double red_pct;          /* Percentage red (dropped) */
+} color_result_t;
+
+/* CBS/EBS burst validation result */
+typedef struct {
+	bool cbs_valid;          /* CBS test passed */
+	bool ebs_valid;          /* EBS test passed */
+	uint32_t measured_cbs;   /* Measured Committed Burst Size */
+	uint32_t measured_ebs;   /* Measured Excess Burst Size */
+	uint32_t expected_cbs;   /* Expected CBS from SLA */
+	uint32_t expected_ebs;   /* Expected EBS from SLA */
+} y1564_burst_result_t;
+
 /* Test configuration */
 typedef struct {
 	/* Interface */
@@ -293,6 +439,24 @@ typedef struct {
 	/* Platform selection */
 	bool use_dpdk;            /* Use DPDK for packet I/O */
 	char *dpdk_args;          /* DPDK EAL arguments */
+
+	/* IMIX configuration */
+	imix_config_t imix;       /* IMIX traffic profile */
+
+	/* Bidirectional testing */
+	bidir_mode_t bidir_mode;  /* Bidirectional test mode */
+	double reverse_rate_pct;  /* Reverse direction rate (for asymmetric) */
+
+	/* Multi-port testing */
+	multiport_config_t multiport; /* Multi-port configuration */
+
+	/* IPv6 testing (RFC 5180) */
+	ip_mode_t ip_mode;        /* IP version mode */
+	ipv6_config_t ipv6;       /* IPv6 configuration */
+
+	/* Y.1564 color-aware metering */
+	bool color_aware;         /* Enable color-aware metering */
+	bool validate_burst;      /* Validate CBS/EBS burst sizes */
 
 	/* Y.1564 configuration */
 	y1564_config_t y1564;     /* Y.1564 test parameters */
@@ -496,6 +660,153 @@ void y1564_default_sla(y1564_sla_t *sla);
 void y1564_print_results(const y1564_config_result_t *config_results,
                          const y1564_perf_result_t *perf_results,
                          uint32_t service_count, stats_format_t format);
+
+/* ============================================================================
+ * IMIX Test Functions
+ * ============================================================================ */
+
+/**
+ * Get predefined IMIX profile configuration
+ * @param profile Profile type (IMIX_SIMPLE, IMIX_CISCO, etc.)
+ * @param config Configuration to populate
+ */
+void imix_get_profile(imix_profile_t profile, imix_config_t *config);
+
+/**
+ * Run IMIX throughput test
+ * @param ctx Test context
+ * @param imix_config IMIX profile configuration
+ * @param result Result structure (caller allocates)
+ * @return 0 on success, negative on error
+ */
+int rfc2544_imix_throughput(rfc2544_ctx_t *ctx, const imix_config_t *imix_config,
+                            imix_result_t *result);
+
+/**
+ * Calculate weighted average frame size for IMIX profile
+ * @param config IMIX configuration
+ * @return Weighted average frame size in bytes
+ */
+double imix_avg_frame_size(const imix_config_t *config);
+
+/* ============================================================================
+ * Bidirectional Test Functions
+ * ============================================================================ */
+
+/**
+ * Run bidirectional throughput test
+ * @param ctx Test context
+ * @param mode Bidirectional mode
+ * @param reverse_rate Reverse direction rate (for asymmetric mode)
+ * @param result Result structure (caller allocates)
+ * @return 0 on success, negative on error
+ */
+int rfc2544_bidir_throughput(rfc2544_ctx_t *ctx, bidir_mode_t mode,
+                             double reverse_rate, bidir_result_t *result);
+
+/* ============================================================================
+ * Multi-Port Test Functions
+ * ============================================================================ */
+
+/**
+ * Initialize multi-port test context
+ * @param ctx Test context
+ * @param config Multi-port configuration
+ * @return 0 on success, negative on error
+ */
+int rfc2544_multiport_init(rfc2544_ctx_t *ctx, const multiport_config_t *config);
+
+/**
+ * Run multi-port throughput test
+ * @param ctx Test context
+ * @param results Array of results (one per port)
+ * @return 0 on success, negative on error
+ */
+int rfc2544_multiport_throughput(rfc2544_ctx_t *ctx, throughput_result_t *results);
+
+/* ============================================================================
+ * IPv6 Test Functions (RFC 5180)
+ * ============================================================================ */
+
+/**
+ * Configure IPv6 test parameters
+ * @param ctx Test context
+ * @param config IPv6 configuration
+ * @return 0 on success, negative on error
+ */
+int rfc2544_ipv6_configure(rfc2544_ctx_t *ctx, const ipv6_config_t *config);
+
+/**
+ * Parse IPv6 address from string
+ * @param str IPv6 address string (e.g., "2001:db8::1")
+ * @param addr Output address buffer (16 bytes)
+ * @return 0 on success, negative on error
+ */
+int rfc2544_parse_ipv6(const char *str, uint8_t addr[16]);
+
+/* ============================================================================
+ * Y.1564 Color-Aware Metering Functions
+ * ============================================================================ */
+
+/**
+ * Run color-aware metering test
+ * @param ctx Test context
+ * @param service Service configuration
+ * @param result Color result structure
+ * @return 0 on success, negative on error
+ */
+int y1564_color_test(rfc2544_ctx_t *ctx, const y1564_service_t *service,
+                     color_result_t *result);
+
+/**
+ * Validate CBS/EBS burst sizes
+ * @param ctx Test context
+ * @param service Service configuration
+ * @param result Burst validation result
+ * @return 0 on success, negative on error
+ */
+int y1564_burst_test(rfc2544_ctx_t *ctx, const y1564_service_t *service,
+                     y1564_burst_result_t *result);
+
+/* ============================================================================
+ * Interface Auto-Detection Functions
+ * ============================================================================ */
+
+/**
+ * NIC capabilities structure
+ */
+typedef struct {
+	char name[64];           /* Interface name */
+	uint64_t link_speed;     /* Link speed in bps */
+	bool supports_hw_ts;     /* Hardware timestamping support */
+	bool supports_xdp;       /* XDP/AF_XDP support */
+	bool is_up;              /* Interface is up */
+	uint32_t mtu;            /* Maximum transmission unit */
+	uint8_t mac[6];          /* MAC address */
+} nic_info_t;
+
+/**
+ * Detect NIC capabilities
+ * @param interface Interface name
+ * @param info NIC info structure to populate
+ * @return 0 on success, negative on error
+ */
+int rfc2544_detect_nic(const char *interface, nic_info_t *info);
+
+/**
+ * List available network interfaces suitable for testing
+ * @param interfaces Array to populate (caller allocates)
+ * @param max_count Maximum interfaces to return
+ * @return Number of interfaces found, negative on error
+ */
+int rfc2544_list_interfaces(nic_info_t *interfaces, uint32_t max_count);
+
+/**
+ * Recommend best interface for testing
+ * @param info Recommended interface info
+ * @return 0 on success, negative on error
+ */
+int rfc2544_recommend_interface(nic_info_t *info);
 
 /* ============================================================================
  * Utility Functions

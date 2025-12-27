@@ -27,7 +27,13 @@ COMMON_SRCS := src/dataplane/common/core.c \
                src/dataplane/common/main.c \
                src/dataplane/common/packet.c \
                src/dataplane/common/pacing.c \
-               src/dataplane/common/y1564.c
+               src/dataplane/common/y1564.c \
+               src/dataplane/common/imix.c \
+               src/dataplane/common/bidir.c \
+               src/dataplane/common/ipv6.c \
+               src/dataplane/common/nic_detect.c \
+               src/dataplane/common/color.c \
+               src/dataplane/common/multiport.c
 
 # Platform-specific sources
 ifeq ($(UNAME),Linux)
