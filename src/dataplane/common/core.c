@@ -522,7 +522,7 @@ int rfc2544_run(rfc2544_ctx_t *ctx)
 
 	/* Allocate workers (single worker for now) */
 	ctx->num_workers = 1;
-	ctx->workers = calloc(ctx->num_workers, sizeof(worker_ctx_t));
+	ctx->workers = calloc((size_t)ctx->num_workers, sizeof(worker_ctx_t));
 	if (!ctx->workers) {
 		ctx->state = STATE_FAILED;
 		return -ENOMEM;
@@ -779,7 +779,11 @@ static int run_trial(rfc2544_ctx_t *ctx, uint32_t frame_size, double rate_pct,
 	/* Create sequence tracker (use uint64_t to avoid overflow at high rates) */
 	uint64_t expected_packets = (uint64_t)(calc_max_pps(ctx->line_rate, frame_size) *
 	                                       rate_pct / 100.0 * duration_sec);
-	seq_tracker_t *tracker = rfc2544_seq_tracker_create(expected_packets + 1000);
+	/* Cap tracker capacity to uint32_t max (4B packets is sufficient for any test) */
+	uint32_t tracker_capacity = (expected_packets + 1000 > UINT32_MAX)
+	                                ? UINT32_MAX
+	                                : (uint32_t)(expected_packets + 1000);
+	seq_tracker_t *tracker = rfc2544_seq_tracker_create(tracker_capacity);
 	if (!tracker) {
 		trial_timer_destroy(timer);
 		pacing_destroy(pacer);
@@ -1121,8 +1125,10 @@ int rfc2544_back_to_back_test(rfc2544_ctx_t *ctx, uint32_t frame_size, burst_res
 
 			/* Run burst trial at 100% rate for very short duration */
 			trial_result_t trial_result;
-			uint32_t burst_duration_ms = (current_burst * 1000) /
-			                             calc_max_pps(ctx->line_rate, frame_size);
+			uint64_t max_pps = calc_max_pps(ctx->line_rate, frame_size);
+			uint32_t burst_duration_ms = (max_pps > 0)
+			                                 ? (uint32_t)(((uint64_t)current_burst * 1000) / max_pps)
+			                                 : 1;
 			if (burst_duration_ms < 1)
 				burst_duration_ms = 1;
 
