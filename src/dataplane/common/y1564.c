@@ -16,6 +16,7 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <inttypes.h>
 #include <math.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -157,7 +158,8 @@ static int compare_latency(const void *a, const void *b)
 static void calc_latency_stats(const uint64_t *samples, uint32_t count, double *avg_ms,
                                double *min_ms, double *max_ms, double *jitter_ms)
 {
-	if (count == 0) {
+	/* Sanity check: limit to 10M samples (80MB allocation) */
+	if (count == 0 || count > 10000000) {
 		*avg_ms = 0.0;
 		*min_ms = 0.0;
 		*max_ms = 0.0;
@@ -709,7 +711,7 @@ void y1564_print_results(const y1564_config_result_t *config_results,
 					const y1564_step_result_t *sr = &cr->steps[i];
 					if (i > 0) printf(",");
 					printf("{\"step\":%u,\"offered_rate_pct\":%.1f,\"achieved_rate_mbps\":%.2f,"
-					       "\"frames_tx\":%lu,\"frames_rx\":%lu,\"flr_pct\":%.4f,"
+					       "\"frames_tx\":%" PRIu64 ",\"frames_rx\":%" PRIu64 ",\"flr_pct\":%.4f,"
 					       "\"fd_avg_ms\":%.2f,\"fd_min_ms\":%.2f,\"fd_max_ms\":%.2f,"
 					       "\"fdv_ms\":%.2f,\"flr_pass\":%s,\"fd_pass\":%s,\"fdv_pass\":%s,"
 					       "\"step_pass\":%s}",
@@ -729,8 +731,8 @@ void y1564_print_results(const y1564_config_result_t *config_results,
 			for (uint32_t s = 0; s < service_count; s++) {
 				const y1564_perf_result_t *pr = &perf_results[s];
 				if (s > 0) printf(",");
-				printf("{\"service_id\":%u,\"duration_sec\":%u,\"frames_tx\":%lu,"
-				       "\"frames_rx\":%lu,\"flr_pct\":%.4f,\"fd_avg_ms\":%.2f,"
+				printf("{\"service_id\":%u,\"duration_sec\":%u,\"frames_tx\":%" PRIu64 ","
+				       "\"frames_rx\":%" PRIu64 ",\"flr_pct\":%.4f,\"fd_avg_ms\":%.2f,"
 				       "\"fd_min_ms\":%.2f,\"fd_max_ms\":%.2f,\"fdv_ms\":%.2f,"
 				       "\"flr_pass\":%s,\"fd_pass\":%s,\"fdv_pass\":%s,\"service_pass\":%s}",
 				       pr->service_id, pr->duration_sec, pr->frames_tx, pr->frames_rx,
@@ -763,8 +765,11 @@ void y1564_print_results(const y1564_config_result_t *config_results,
 		if (perf_results) {
 			for (uint32_t s = 0; s < service_count; s++) {
 				const y1564_perf_result_t *pr = &perf_results[s];
+				double rate_mbps = pr->duration_sec > 0
+				    ? (double)pr->frames_tx * 8 / pr->duration_sec / 1e6
+				    : 0.0;
 				printf("%u,perf,0,100,%.2f,%.4f,%.2f,%.2f,%s\n",
-				       pr->service_id, (double)pr->frames_tx * 8 / pr->duration_sec / 1e6,
+				       pr->service_id, rate_mbps,
 				       pr->flr_pct, pr->fd_avg_ms, pr->fdv_ms,
 				       pr->service_pass ? "PASS" : "FAIL");
 			}
@@ -794,7 +799,7 @@ void y1564_print_results(const y1564_config_result_t *config_results,
 
 			for (int i = 0; i < Y1564_CONFIG_STEPS; i++) {
 				const y1564_step_result_t *sr = &cr->steps[i];
-				printf("%-6u %7.0f%% %12.2f %15lu %11.4f%% %10.2f %10.2f %10s %8s\n", sr->step,
+				printf("%-6u %7.0f%% %12.2f %15" PRIu64 " %11.4f%% %10.2f %10.2f %10s %8s\n", sr->step,
 				       sr->offered_rate_pct, sr->achieved_rate_mbps, sr->frames_tx,
 				       sr->flr_pct, sr->fd_avg_ms, sr->fdv_ms,
 				       sr->step_pass ? "PASS" : "FAIL",
@@ -813,7 +818,7 @@ void y1564_print_results(const y1564_config_result_t *config_results,
 
 		for (uint32_t s = 0; s < service_count; s++) {
 			const y1564_perf_result_t *pr = &perf_results[s];
-			printf("%-10u %10um %15lu %11.4f%% %10.2f %10.2f %8s\n", pr->service_id,
+			printf("%-10u %10um %15" PRIu64 " %11.4f%% %10.2f %10.2f %8s\n", pr->service_id,
 			       pr->duration_sec / 60, pr->frames_tx, pr->flr_pct, pr->fd_avg_ms,
 			       pr->fdv_ms, pr->service_pass ? "PASS" : "FAIL");
 		}

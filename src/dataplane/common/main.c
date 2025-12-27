@@ -190,8 +190,7 @@ int main(int argc, char **argv)
 				fprintf(stderr, "Missing value for %s\n", argv[i]);
 				return 1;
 			}
-			/* TODO: Store DPDK args */
-			i++;
+			config.dpdk_args = argv[++i];
 #endif
 		} else {
 			fprintf(stderr, "Unknown option: %s\n", argv[i]);
