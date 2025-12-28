@@ -133,10 +133,13 @@ void rfc2544_log(log_level_t level, const char *fmt, ...)
 		return;
 
 	const char *level_str[] = {"ERROR", "WARN", "INFO", "DEBUG"};
+	const size_t num_levels = sizeof(level_str) / sizeof(level_str[0]);
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 
-	fprintf(stderr, "[%ld.%03ld] [%s] ", ts.tv_sec, ts.tv_nsec / 1000000, level_str[level]);
+	/* Bounds check level to prevent array overrun */
+	const char *level_name = (level < num_levels) ? level_str[level] : "???";
+	fprintf(stderr, "[%ld.%03ld] [%s] ", ts.tv_sec, ts.tv_nsec / 1000000, level_name);
 
 	va_list args;
 	va_start(args, fmt);
@@ -169,8 +172,14 @@ static const platform_ops_t *select_platform(rfc2544_ctx_t *ctx)
 		rfc2544_log(LOG_INFO, "Platform: DPDK (line-rate mode)");
 		return get_dpdk_platform_ops();
 	}
-#else
-	(void)ctx; /* Silence unused parameter warning when DPDK disabled */
+#endif
+
+#if PLATFORM_LINUX
+	/* Force AF_PACKET for veth/testing compatibility */
+	if (ctx->config.force_packet) {
+		rfc2544_log(LOG_INFO, "Platform: AF_PACKET (forced - for veth/testing)");
+		return get_packet_platform_ops();
+	}
 #endif
 
 #if HAVE_AF_XDP
@@ -348,10 +357,13 @@ void rfc2544_log_internal(log_level_t level, const char *fmt, ...)
 		return;
 
 	const char *level_str[] = {"ERROR", "WARN", "INFO", "DEBUG"};
+	const size_t num_levels = sizeof(level_str) / sizeof(level_str[0]);
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 
-	fprintf(stderr, "[%ld.%03ld] [%s] ", ts.tv_sec, ts.tv_nsec / 1000000, level_str[level]);
+	/* Bounds check level to prevent array overrun */
+	const char *level_name = (level < num_levels) ? level_str[level] : "???";
+	fprintf(stderr, "[%ld.%03ld] [%s] ", ts.tv_sec, ts.tv_nsec / 1000000, level_name);
 
 	va_list args;
 	va_start(args, fmt);
@@ -493,7 +505,7 @@ void rfc2544_cleanup(rfc2544_ctx_t *ctx)
  * Test Execution
  * ============================================================================ */
 
-static void report_progress(rfc2544_ctx_t *ctx, const char *message, double pct)
+void report_progress(rfc2544_ctx_t *ctx, const char *message, double pct)
 {
 	if (ctx->progress_cb) {
 		ctx->progress_cb(ctx, message, pct);
@@ -676,6 +688,18 @@ int rfc2544_run(rfc2544_ctx_t *ctx)
 		}
 		break;
 
+	/*
+	 * Extended test types (RFC 2889, RFC 6349, Y.1731, MEF, TSN)
+	 * are implemented in their respective source files and can be
+	 * called directly. Full dispatch integration requires adding
+	 * configuration structures to rfc2544_config_t.
+	 *
+	 * Example direct usage:
+	 *   rfc2889_config_t cfg;
+	 *   rfc2889_default_config(&cfg);
+	 *   rfc2889_forwarding_test(ctx, &cfg, &result);
+	 */
+
 	default:
 		ret = -EINVAL;
 		break;
@@ -701,17 +725,7 @@ int rfc2544_run(rfc2544_ctx_t *ctx)
  * Trial Execution Helper
  * ============================================================================ */
 
-/* Trial result */
-typedef struct {
-	uint64_t packets_sent;
-	uint64_t packets_recv;
-	uint64_t bytes_sent;
-	double loss_pct;
-	double elapsed_sec;
-	double achieved_pps;
-	double achieved_mbps;
-	latency_stats_t latency;
-} trial_result_t;
+/* trial_result_t is defined in rfc2544_internal.h */
 
 /**
  * Run a single trial at the specified rate
@@ -724,7 +738,7 @@ typedef struct {
  * @param result Output trial result
  * @return 0 on success, negative on error
  */
-static int run_trial(rfc2544_ctx_t *ctx, uint32_t frame_size, double rate_pct,
+int run_trial(rfc2544_ctx_t *ctx, uint32_t frame_size, double rate_pct,
                      uint32_t duration_sec, uint32_t warmup_sec, trial_result_t *result)
 {
 	if (!ctx || !result)
@@ -898,7 +912,12 @@ static int run_trial(rfc2544_ctx_t *ctx, uint32_t frame_size, double rate_pct,
 	result->elapsed_sec = elapsed;
 
 	if (packets_sent > 0) {
-		result->loss_pct = 100.0 * (packets_sent - packets_recv) / packets_sent;
+		/* Guard against underflow when recv > sent (timing/duplicates) */
+		if (packets_recv >= packets_sent) {
+			result->loss_pct = 0.0;
+		} else {
+			result->loss_pct = 100.0 * (packets_sent - packets_recv) / packets_sent;
+		}
 	} else {
 		result->loss_pct = 0.0;
 	}
@@ -924,6 +943,23 @@ static int run_trial(rfc2544_ctx_t *ctx, uint32_t frame_size, double rate_pct,
 	free(pkt_buffer);
 
 	return 0;
+}
+
+/**
+ * Run a trial with custom signature (for Y.1564, Y.1731, MEF, TSN, etc.)
+ * Currently delegates to run_trial - signature support planned for future
+ */
+int run_trial_custom(rfc2544_ctx_t *ctx, uint32_t frame_size, double rate_pct,
+                     uint32_t duration_sec, uint32_t warmup_sec,
+                     const char *signature, uint32_t stream_id,
+                     trial_result_t *result)
+{
+	/* TODO: Use custom signature and stream_id in packet generation */
+	(void)signature;
+	(void)stream_id;
+
+	/* For now, delegate to standard run_trial */
+	return run_trial(ctx, frame_size, rate_pct, duration_sec, warmup_sec, result);
 }
 
 /* ============================================================================
@@ -1232,7 +1268,10 @@ int rfc2544_system_recovery_test(rfc2544_ctx_t *ctx, uint32_t frame_size,
 			break;
 		}
 
-		frames_lost += (recovery_trial.packets_sent - recovery_trial.packets_recv);
+		/* Guard against underflow when rx > tx */
+		if (recovery_trial.packets_recv < recovery_trial.packets_sent) {
+			frames_lost += (recovery_trial.packets_sent - recovery_trial.packets_recv);
+		}
 		usleep(check_interval_ms * 1000);
 	}
 
@@ -1308,7 +1347,10 @@ int rfc2544_reset_test(rfc2544_ctx_t *ctx, uint32_t frame_size, reset_result_t *
 				first_loss_time = get_timestamp_ns();
 				rfc2544_log(LOG_INFO, "Reset detected - loss started");
 			}
-			frames_lost += (trial.packets_sent - trial.packets_recv);
+			/* Guard against underflow when rx > tx */
+			if (trial.packets_recv < trial.packets_sent) {
+				frames_lost += (trial.packets_sent - trial.packets_recv);
+			}
 		} else if (loss_detected && trial.loss_pct <= 0.001) {
 			/* Recovery after loss */
 			recovery_time = get_timestamp_ns();

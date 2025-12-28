@@ -297,6 +297,12 @@ static int y1564_run_step(rfc2544_ctx_t *ctx, const y1564_service_t *service, do
 	uint64_t line_rate = rfc2544_get_line_rate_ctx(ctx);
 	uint32_t frame_size = service->frame_size;
 
+	/* Validate line_rate to prevent division by zero */
+	if (line_rate == 0) {
+		y1564_log(LOG_ERROR, "Invalid line rate (0) - cannot calculate rate percentage");
+		return -EINVAL;
+	}
+
 	/* Create packet template */
 	uint8_t *pkt_buffer = malloc(frame_size);
 	if (!pkt_buffer)
@@ -450,7 +456,12 @@ static int y1564_run_step(rfc2544_ctx_t *ctx, const y1564_service_t *service, do
 	result->achieved_mbps = calc_rate_mbps(frames_tx, frame_size, elapsed);
 
 	if (frames_tx > 0) {
-		result->flr_pct = 100.0 * (frames_tx - frames_rx) / frames_tx;
+		/* Guard against underflow when rx > tx */
+		if (frames_rx >= frames_tx) {
+			result->flr_pct = 0.0;
+		} else {
+			result->flr_pct = 100.0 * (frames_tx - frames_rx) / frames_tx;
+		}
 	}
 
 	/* Calculate latency stats */

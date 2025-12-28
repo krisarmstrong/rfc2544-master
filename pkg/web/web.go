@@ -325,8 +325,71 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
     }
   }'</pre>
     </div>
+    <div class="card">
+        <h2>RFC 2889 LAN Switch Benchmarking</h2>
+        <h3>Test Types</h3>
+        <ul>
+            <li><b>rfc2889_forwarding</b> - Forwarding rate measurement</li>
+            <li><b>rfc2889_caching</b> - Address caching capacity</li>
+            <li><b>rfc2889_learning</b> - Address learning rate</li>
+            <li><b>rfc2889_broadcast</b> - Broadcast forwarding</li>
+            <li><b>rfc2889_congestion</b> - Congestion control</li>
+        </ul>
+        <pre>curl -X POST http://localhost%s/api/start \
+  -H "Content-Type: application/json" \
+  -d '{"interface":"eth0","test_type":"rfc2889_forwarding"}'</pre>
+    </div>
+    <div class="card">
+        <h2>RFC 6349 TCP Throughput Testing</h2>
+        <h3>Test Types</h3>
+        <ul>
+            <li><b>rfc6349_throughput</b> - TCP throughput measurement</li>
+            <li><b>rfc6349_path</b> - Path analysis (RTT, bottleneck BW)</li>
+        </ul>
+        <pre>curl -X POST http://localhost%s/api/start \
+  -H "Content-Type: application/json" \
+  -d '{"interface":"eth0","test_type":"rfc6349_throughput"}'</pre>
+    </div>
+    <div class="card">
+        <h2>ITU-T Y.1731 Ethernet OAM</h2>
+        <h3>Test Types</h3>
+        <ul>
+            <li><b>y1731_delay</b> - Delay measurement (DMM/DMR)</li>
+            <li><b>y1731_loss</b> - Loss measurement (LMM/LMR)</li>
+            <li><b>y1731_slm</b> - Synthetic loss measurement</li>
+            <li><b>y1731_loopback</b> - Loopback test (LBM/LBR)</li>
+        </ul>
+        <pre>curl -X POST http://localhost%s/api/start \
+  -H "Content-Type: application/json" \
+  -d '{"interface":"eth0","test_type":"y1731_delay"}'</pre>
+    </div>
+    <div class="card">
+        <h2>MEF Service Activation</h2>
+        <h3>Test Types</h3>
+        <ul>
+            <li><b>mef_config</b> - Configuration test (step)</li>
+            <li><b>mef_perf</b> - Performance test (sustained)</li>
+            <li><b>mef</b> - Full MEF test suite</li>
+        </ul>
+        <pre>curl -X POST http://localhost%s/api/start \
+  -H "Content-Type: application/json" \
+  -d '{"interface":"eth0","test_type":"mef"}'</pre>
+    </div>
+    <div class="card">
+        <h2>IEEE 802.1Qbv TSN Testing</h2>
+        <h3>Test Types</h3>
+        <ul>
+            <li><b>tsn_timing</b> - Gate timing accuracy</li>
+            <li><b>tsn_isolation</b> - Traffic class isolation</li>
+            <li><b>tsn_latency</b> - Scheduled latency</li>
+            <li><b>tsn</b> - Full TSN test suite</li>
+        </ul>
+        <pre>curl -X POST http://localhost%s/api/start \
+  -H "Content-Type: application/json" \
+  -d '{"interface":"eth0","test_type":"tsn"}'</pre>
+    </div>
 </body>
-</html>`, s.addr, s.addr, s.addr)
+</html>`, s.addr, s.addr, s.addr, s.addr, s.addr, s.addr, s.addr, s.addr)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

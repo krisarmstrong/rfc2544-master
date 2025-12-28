@@ -369,6 +369,10 @@ uint64_t calc_max_pps(uint64_t line_rate_bps, uint32_t frame_size)
  */
 double calc_utilization(uint64_t achieved_pps, uint32_t frame_size, uint64_t line_rate_bps)
 {
+	/* Protect against division by zero */
+	if (line_rate_bps == 0)
+		return 0.0;
+
 	uint32_t wire_size = frame_size + 20;
 	uint64_t achieved_bps = achieved_pps * wire_size * 8;
 	return 100.0 * achieved_bps / line_rate_bps;

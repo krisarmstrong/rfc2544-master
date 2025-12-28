@@ -74,6 +74,9 @@ void print_usage(const char *prog)
 	fprintf(stderr, "  --dpdk-args ARGS    Pass arguments to DPDK EAL\n");
 #endif
 
+	fprintf(stderr, "\nPlatform Options:\n");
+	fprintf(stderr, "  --force-packet      Force AF_PACKET (for veth/testing)\n");
+
 	fprintf(stderr, "\nGeneral:\n");
 	fprintf(stderr, "  -h, --help          Show this help message\n");
 
@@ -192,6 +195,8 @@ int main(int argc, char **argv)
 			}
 			config.dpdk_args = argv[++i];
 #endif
+		} else if (strcmp(argv[i], "--force-packet") == 0) {
+			config.force_packet = true;
 		} else {
 			fprintf(stderr, "Unknown option: %s\n", argv[i]);
 			print_usage(argv[0]);

@@ -1,0 +1,29 @@
+#!/usr/bin/make -f
+
+export DH_VERBOSE = 1
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	$(MAKE) linux
+
+override_dh_auto_install:
+	# Install binary
+	install -D -m 755 rfc2544-linux debian/rfc2544-master/usr/bin/rfc2544
+
+	# Install systemd service
+	install -D -m 644 scripts/service/rfc2544.service debian/rfc2544-master/lib/systemd/system/rfc2544.service
+
+	# Install environment file template
+	install -D -m 644 packaging/debian/environment debian/rfc2544-master/etc/rfc2544/environment
+
+override_dh_auto_clean:
+	$(MAKE) clean || true
+
+override_dh_installsystemd:
+	dh_installsystemd --name=rfc2544 --no-enable --no-start
+
+override_dh_strip:
+	dh_strip --no-automatic-dbgsym

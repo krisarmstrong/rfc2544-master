@@ -1,0 +1,10 @@
+# RFC2544 Test Master environment configuration
+# This file is sourced by the systemd service
+
+# Default arguments for the service (web UI mode)
+# Customize as needed
+RFC2544_ARGS="--web :8080"
+
+# Examples:
+# RFC2544_ARGS="--web :8080 --interface eth0"
+# RFC2544_ARGS="--web :8080 --interface enp4s0 --verbose"

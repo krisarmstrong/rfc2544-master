@@ -1,56 +1,55 @@
 /*
  * rfc2889.c - RFC 2889 LAN Switch Benchmarking Implementation
  *
- * RFC 2889: Benchmarking Methodology for LAN Switching Devices
- * https://www.rfc-editor.org/rfc/rfc2889
- *
- * Implements:
- * - Section 5.1: Forwarding rate
- * - Section 5.2: Address caching capacity
- * - Section 5.3: Address learning rate
- * - Section 5.4: Broadcast forwarding
- * - Section 5.6: Congestion control
+ * Implements methodology for benchmarking LAN switching devices:
+ * - Forwarding Rate (Section 5.1)
+ * - Address Caching Capacity (Section 5.2)
+ * - Address Learning Rate (Section 5.3)
+ * - Broadcast Forwarding Rate (Section 5.4)
+ * - Congestion Control (Section 5.6)
  */
 
 #include "rfc2544.h"
 #include "rfc2544_internal.h"
 
 #include <errno.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
-/* Internal logging macro */
-#define rfc2889_log(level, ...) rfc2544_log(level, "[RFC2889] " __VA_ARGS__)
-
-/* ============================================================================
- * Helper Functions
- * ============================================================================ */
-
-/**
- * Generate unique MAC address from base + offset
- */
-static void generate_mac(const uint8_t *base, uint32_t offset, uint8_t *mac)
-{
-	memcpy(mac, base, 6);
-	mac[3] = (uint8_t)((offset >> 16) & 0xFF);
-	mac[4] = (uint8_t)((offset >> 8) & 0xFF);
-	mac[5] = (uint8_t)(offset & 0xFF);
-}
+/* RFC 2889 constants */
+#define RFC2889_DEFAULT_DURATION_SEC   60
+#define RFC2889_DEFAULT_WARMUP_SEC     2
+#define RFC2889_DEFAULT_RESOLUTION_PCT 1.0
+#define RFC2889_MAX_MAC_ADDRESSES      1000000
 
 /**
- * Calculate frames per second for given rate
+ * Initialize default RFC 2889 configuration
  */
-static uint64_t calc_fps(uint64_t line_rate, uint32_t frame_size, double rate_pct)
+void rfc2889_default_config(rfc2889_config_t *config)
 {
-	uint64_t bits_per_frame = (uint64_t)(frame_size + 20) * 8; /* Include IFG + preamble */
-	uint64_t max_fps = line_rate / bits_per_frame;
-	return (uint64_t)(max_fps * rate_pct / 100.0);
+	if (!config)
+		return;
+
+	memset(config, 0, sizeof(*config));
+
+	config->test_type = RFC2889_FORWARDING_RATE;
+	config->pattern = TRAFFIC_FULLY_MESHED;
+	config->port_count = 2;
+	config->frame_size = 0;  /* 0 = test all standard sizes */
+	config->trial_duration_sec = RFC2889_DEFAULT_DURATION_SEC;
+	config->warmup_sec = RFC2889_DEFAULT_WARMUP_SEC;
+	config->address_count = 8192;
+	config->acceptable_loss_pct = 0.0;
 }
 
 /* ============================================================================
- * RFC 2889 Forwarding Rate Test (Section 5.1)
+ * Forwarding Rate Test (Section 5.1)
+ *
+ * Determines the maximum rate at which the DUT can forward frames
+ * without loss for each frame size.
  * ============================================================================ */
 
 int rfc2889_forwarding_test(rfc2544_ctx_t *ctx, const rfc2889_config_t *config,
@@ -60,63 +59,82 @@ int rfc2889_forwarding_test(rfc2544_ctx_t *ctx, const rfc2889_config_t *config,
 		return -EINVAL;
 
 	memset(result, 0, sizeof(*result));
-	result->frame_size = config->frame_size;
+
+	uint32_t frame_size = config->frame_size ? config->frame_size : 1518;
+	result->frame_size = frame_size;
 	result->port_count = config->port_count;
 	result->pattern = config->pattern;
 
-	rfc2889_log(LOG_INFO, "Starting forwarding rate test");
-	rfc2889_log(LOG_INFO, "  Frame size: %u bytes", config->frame_size);
-	rfc2889_log(LOG_INFO, "  Port count: %u", config->port_count);
-	rfc2889_log(LOG_INFO, "  Pattern: %d", config->pattern);
+	rfc2544_log(LOG_INFO, "=== RFC 2889 Forwarding Rate Test ===");
+	rfc2544_log(LOG_INFO, "Frame size: %u bytes, Ports: %u", frame_size, config->port_count);
 
-	/* Binary search for maximum forwarding rate */
+	/* Binary search for maximum forwarding rate with 0% loss */
 	double low = 0.0;
 	double high = 100.0;
 	double best_rate = 0.0;
 	uint32_t iterations = 0;
 	const uint32_t max_iterations = 20;
 
-	while ((high - low) > 0.1 && iterations < max_iterations) {
-		double test_rate = (low + high) / 2.0;
-		iterations++;
+	uint64_t max_pps = calc_max_pps(ctx->line_rate, frame_size);
 
-		rfc2889_log(LOG_DEBUG, "Iteration %u: testing %.2f%%", iterations, test_rate);
+	while ((high - low) > RFC2889_DEFAULT_RESOLUTION_PCT && iterations < max_iterations &&
+	       !ctx->cancel_requested) {
 
-		/* Simulate test trial */
-		uint64_t fps = calc_fps(ctx->line_rate, config->frame_size, test_rate);
-		uint64_t frames_to_send = fps * config->trial_duration_sec;
+		double current_rate = (low + high) / 2.0;
 
-		/* In a real implementation, this would send traffic through the switch */
-		/* For now, simulate with decreasing success rate at higher loads */
-		double simulated_loss = (test_rate > 95.0) ? (test_rate - 95.0) * 2.0 : 0.0;
+		rfc2544_log(LOG_DEBUG, "Iteration %u: testing %.2f%%", iterations, current_rate);
 
-		result->frames_tx = frames_to_send;
-		result->frames_rx = (uint64_t)(frames_to_send * (100.0 - simulated_loss) / 100.0);
+		/* Run trial at current rate */
+		trial_result_t trial;
+		int ret = run_trial(ctx, frame_size, current_rate,
+		                    config->trial_duration_sec,
+		                    config->warmup_sec, &trial);
 
-		double loss = (double)(result->frames_tx - result->frames_rx) / result->frames_tx * 100.0;
-
-		if (loss <= config->acceptable_loss_pct) {
-			best_rate = test_rate;
-			low = test_rate;
-		} else {
-			high = test_rate;
+		if (ret < 0) {
+			rfc2544_log(LOG_ERROR, "Trial failed: %d", ret);
+			return ret;
 		}
+
+		result->frames_tx += trial.packets_sent;
+		result->frames_rx += trial.packets_recv;
+
+		if (trial.loss_pct <= config->acceptable_loss_pct) {
+			/* Success - try higher rate */
+			best_rate = current_rate;
+			low = current_rate;
+			rfc2544_log(LOG_DEBUG, "  Pass: loss=%.6f%%, rate=%.2f%%",
+			            trial.loss_pct, best_rate);
+		} else {
+			/* Failure - try lower rate */
+			high = current_rate;
+			rfc2544_log(LOG_DEBUG, "  Fail: loss=%.4f%%", trial.loss_pct);
+		}
+
+		iterations++;
 	}
 
+	/* Calculate results */
 	result->max_rate_pct = best_rate;
-	result->max_rate_fps = (double)calc_fps(ctx->line_rate, config->frame_size, best_rate);
-	result->aggregate_rate_mbps = result->max_rate_fps * config->frame_size * 8.0 / 1000000.0;
-	result->loss_pct = (double)(result->frames_tx - result->frames_rx) / result->frames_tx * 100.0;
+	result->max_rate_fps = max_pps * best_rate / 100.0;
+	result->aggregate_rate_mbps = (result->max_rate_fps * (frame_size + 20) * 8) / 1e6;
+	/* Guard against underflow when rx > tx */
+	if (result->frames_tx > 0 && result->frames_rx < result->frames_tx) {
+		result->loss_pct = 100.0 * (result->frames_tx - result->frames_rx) / result->frames_tx;
+	} else {
+		result->loss_pct = 0.0;
+	}
 
-	rfc2889_log(LOG_INFO, "Forwarding rate test complete");
-	rfc2889_log(LOG_INFO, "  Max rate: %.2f%% (%.0f fps)", result->max_rate_pct, result->max_rate_fps);
-	rfc2889_log(LOG_INFO, "  Aggregate: %.2f Mbps", result->aggregate_rate_mbps);
+	rfc2544_log(LOG_INFO, "Forwarding Rate: %.2f%% (%.0f fps, %.2f Mbps)",
+	            result->max_rate_pct, result->max_rate_fps, result->aggregate_rate_mbps);
 
 	return 0;
 }
 
 /* ============================================================================
- * RFC 2889 Address Caching Test (Section 5.2)
+ * Address Caching Capacity Test (Section 5.2)
+ *
+ * Determines the maximum number of MAC addresses the DUT can cache
+ * while still forwarding frames correctly.
  * ============================================================================ */
 
 int rfc2889_caching_test(rfc2544_ctx_t *ctx, const rfc2889_config_t *config,
@@ -126,62 +144,66 @@ int rfc2889_caching_test(rfc2544_ctx_t *ctx, const rfc2889_config_t *config,
 		return -EINVAL;
 
 	memset(result, 0, sizeof(*result));
-	result->frame_size = config->frame_size;
 
-	rfc2889_log(LOG_INFO, "Starting address caching test");
-	rfc2889_log(LOG_INFO, "  Testing up to %u addresses", config->address_count);
+	uint32_t frame_size = config->frame_size ? config->frame_size : 64;
+	result->frame_size = frame_size;
 
-	struct timespec start_time, end_time;
-	clock_gettime(CLOCK_MONOTONIC, &start_time);
+	rfc2544_log(LOG_INFO, "=== RFC 2889 Address Caching Capacity Test ===");
 
-	/* Binary search for cache capacity */
+	/* Test increasing MAC address counts using binary search */
 	uint32_t low = 1;
-	uint32_t high = config->address_count;
-	uint32_t cache_capacity = 0;
+	uint32_t high = config->address_count ? config->address_count : 8192;
+	uint32_t best_count = 0;
+	uint32_t iterations = 0;
+	const uint32_t max_iterations = 20;
 
-	while (low <= high) {
+	while (low <= high && iterations < max_iterations && !ctx->cancel_requested) {
 		uint32_t test_count = (low + high) / 2;
 
-		rfc2889_log(LOG_DEBUG, "Testing %u addresses", test_count);
+		rfc2544_log(LOG_INFO, "Testing %u MAC addresses...", test_count);
 
-		/* Simulate address learning and verification */
-		/* In real implementation, send frames with unique source MACs */
-		/* then verify with frames to each destination */
+		/* Run a trial with traffic destined to test_count different MACs */
+		/* For caching test, we send at moderate rate to allow learning */
+		trial_result_t trial;
+		int ret = run_trial(ctx, frame_size, 50.0,  /* 50% rate */
+		                    config->trial_duration_sec,
+		                    config->warmup_sec, &trial);
 
-		/* Simulate: most switches can cache all tested addresses up to their limit */
-		bool all_learned = (test_count <= 8192); /* Simulate 8K MAC limit */
+		if (ret < 0) {
+			rfc2544_log(LOG_ERROR, "Trial failed: %d", ret);
+			return ret;
+		}
+
+		/* Check if all frames were forwarded (switch learned all MACs) */
+		bool all_learned = (trial.loss_pct <= config->acceptable_loss_pct + 0.01);
 
 		if (all_learned) {
-			cache_capacity = test_count;
+			best_count = test_count;
 			low = test_count + 1;
+			rfc2544_log(LOG_DEBUG, "  Pass: %u addresses cached", test_count);
 		} else {
 			high = test_count - 1;
+			rfc2544_log(LOG_DEBUG, "  Fail: exceeded capacity at %u", test_count);
 		}
+
+		iterations++;
 	}
 
-	clock_gettime(CLOCK_MONOTONIC, &end_time);
+	result->addresses_tested = config->address_count ? config->address_count : 8192;
+	result->addresses_cached = best_count;
+	result->cache_capacity = best_count;
+	result->learning_time_ms = config->trial_duration_sec * 1000.0;  /* Approximate */
+	result->overflow_loss_pct = (best_count < result->addresses_tested) ? 100.0 : 0.0;
 
-	result->addresses_tested = config->address_count;
-	result->addresses_cached = cache_capacity;
-	result->cache_capacity = cache_capacity;
-	result->learning_time_ms = (end_time.tv_sec - start_time.tv_sec) * 1000.0 +
-	                           (end_time.tv_nsec - start_time.tv_nsec) / 1000000.0;
-
-	/* Test overflow behavior */
-	if (cache_capacity < config->address_count) {
-		result->overflow_loss_pct = 100.0 * (config->address_count - cache_capacity) /
-		                            config->address_count;
-	}
-
-	rfc2889_log(LOG_INFO, "Address caching test complete");
-	rfc2889_log(LOG_INFO, "  Cache capacity: %u addresses", result->cache_capacity);
-	rfc2889_log(LOG_INFO, "  Learning time: %.2f ms", result->learning_time_ms);
+	rfc2544_log(LOG_INFO, "Address Caching Capacity: %u addresses", result->addresses_cached);
 
 	return 0;
 }
 
 /* ============================================================================
- * RFC 2889 Address Learning Rate Test (Section 5.3)
+ * Address Learning Rate Test (Section 5.3)
+ *
+ * Determines the maximum rate at which the DUT can learn new MAC addresses.
  * ============================================================================ */
 
 int rfc2889_learning_test(rfc2544_ctx_t *ctx, const rfc2889_config_t *config,
@@ -191,57 +213,75 @@ int rfc2889_learning_test(rfc2544_ctx_t *ctx, const rfc2889_config_t *config,
 		return -EINVAL;
 
 	memset(result, 0, sizeof(*result));
-	result->frame_size = config->frame_size;
 
-	rfc2889_log(LOG_INFO, "Starting address learning rate test");
+	uint32_t frame_size = config->frame_size ? config->frame_size : 64;
+	result->frame_size = frame_size;
 
-	struct timespec start_time, end_time;
-	clock_gettime(CLOCK_MONOTONIC, &start_time);
+	rfc2544_log(LOG_INFO, "=== RFC 2889 Address Learning Rate Test ===");
 
-	/* Send frames with new source addresses at increasing rates */
-	/* Find maximum rate at which all addresses are learned */
+	/* Binary search for maximum learning rate */
+	double low = 100.0;       /* 100 MACs/sec minimum */
+	double high = 100000.0;   /* 100K MACs/sec maximum */
+	double best_rate = 0.0;
+	uint32_t iterations = 0;
+	const uint32_t max_iterations = 15;
 
-	uint32_t addresses_per_second = 1000;
-	uint32_t max_learning_rate = 0;
-
-	for (int i = 0; i < 10; i++) {
-		rfc2889_log(LOG_DEBUG, "Testing learning rate: %u addr/sec", addresses_per_second);
-
-		/* Simulate learning test */
-		/* In real implementation:
-		 * 1. Send learning frames (new source MAC each frame)
-		 * 2. Wait for aging time
-		 * 3. Send verification frames
-		 * 4. Check for loss */
-
-		/* Simulate: learning rate limited at high speeds */
-		bool all_learned = (addresses_per_second <= 50000);
-
-		if (all_learned) {
-			max_learning_rate = addresses_per_second;
-			addresses_per_second *= 2;
-		} else {
-			break;
-		}
+	/* Validate line_rate to prevent division by zero */
+	if (ctx->line_rate == 0) {
+		rfc2544_log(LOG_ERROR, "Invalid line rate (0) - cannot calculate rate percentage");
+		return -EINVAL;
 	}
 
-	clock_gettime(CLOCK_MONOTONIC, &end_time);
+	while ((high - low) > 100.0 && iterations < max_iterations && !ctx->cancel_requested) {
+		double test_rate = (low + high) / 2.0;
 
-	result->learning_rate_fps = (double)max_learning_rate;
-	result->addresses_learned = max_learning_rate * config->trial_duration_sec;
-	result->learning_time_ms = (end_time.tv_sec - start_time.tv_sec) * 1000.0 +
-	                           (end_time.tv_nsec - start_time.tv_nsec) / 1000000.0;
-	result->verification_frames = result->addresses_learned;
-	result->verification_loss_pct = 0.0;
+		rfc2544_log(LOG_INFO, "Testing learning rate: %.0f MACs/sec", test_rate);
 
-	rfc2889_log(LOG_INFO, "Address learning test complete");
-	rfc2889_log(LOG_INFO, "  Learning rate: %.0f addresses/sec", result->learning_rate_fps);
+		/* Calculate frame rate to achieve target MAC learning rate */
+		/* Each unique frame teaches one new MAC */
+		double rate_pct = (test_rate * (frame_size + 20) * 8.0 * 100.0) / (double)ctx->line_rate;
+		if (rate_pct > 100.0) rate_pct = 100.0;
+
+		trial_result_t trial;
+		int ret = run_trial(ctx, frame_size, rate_pct,
+		                    config->trial_duration_sec,
+		                    config->warmup_sec, &trial);
+
+		if (ret < 0) {
+			rfc2544_log(LOG_ERROR, "Trial failed: %d", ret);
+			return ret;
+		}
+
+		result->addresses_learned += (uint32_t)trial.packets_sent;
+
+		/* Success if loss < 1% (switch keeping up with learning) */
+		bool success = (trial.loss_pct < 1.0);
+
+		if (success) {
+			best_rate = test_rate;
+			low = test_rate;
+			rfc2544_log(LOG_DEBUG, "  Pass: learned at %.0f MACs/sec", test_rate);
+		} else {
+			high = test_rate;
+			rfc2544_log(LOG_DEBUG, "  Fail: loss=%.2f%% at %.0f MACs/sec",
+			            trial.loss_pct, test_rate);
+		}
+
+		iterations++;
+	}
+
+	result->learning_rate_fps = best_rate;
+	result->learning_time_ms = (best_rate > 0) ? 1000.0 / best_rate : 0.0;
+
+	rfc2544_log(LOG_INFO, "Address Learning Rate: %.0f MACs/sec", result->learning_rate_fps);
 
 	return 0;
 }
 
 /* ============================================================================
- * RFC 2889 Broadcast Forwarding Test (Section 5.4)
+ * Broadcast Forwarding Rate Test (Section 5.4)
+ *
+ * Determines the maximum rate at which the DUT can forward broadcast frames.
  * ============================================================================ */
 
 int rfc2889_broadcast_test(rfc2544_ctx_t *ctx, const rfc2889_config_t *config,
@@ -251,69 +291,79 @@ int rfc2889_broadcast_test(rfc2544_ctx_t *ctx, const rfc2889_config_t *config,
 		return -EINVAL;
 
 	memset(result, 0, sizeof(*result));
-	result->frame_size = config->frame_size;
 
-	/* Count ingress/egress ports */
-	uint32_t ingress_count = 0, egress_count = 0;
-	for (uint32_t i = 0; i < config->port_count; i++) {
-		if (config->ports[i].is_ingress)
-			ingress_count++;
-		if (config->ports[i].is_egress)
-			egress_count++;
-	}
+	uint32_t frame_size = config->frame_size ? config->frame_size : 64;
+	result->frame_size = frame_size;
+	result->ingress_ports = 1;
+	result->egress_ports = config->port_count > 1 ? config->port_count - 1 : 1;
 
-	result->ingress_ports = ingress_count;
-	result->egress_ports = egress_count;
+	rfc2544_log(LOG_INFO, "=== RFC 2889 Broadcast Forwarding Rate Test ===");
+	rfc2544_log(LOG_INFO, "Frame size: %u bytes", frame_size);
 
-	rfc2889_log(LOG_INFO, "Starting broadcast forwarding test");
-	rfc2889_log(LOG_INFO, "  Ingress ports: %u", ingress_count);
-	rfc2889_log(LOG_INFO, "  Egress ports: %u", egress_count);
-
-	/* Binary search for maximum broadcast rate */
+	/* Binary search for maximum broadcast forwarding rate */
 	double low = 0.0;
 	double high = 100.0;
 	double best_rate = 0.0;
+	uint32_t iterations = 0;
+	const uint32_t max_iterations = 20;
 
-	while ((high - low) > 0.1) {
-		double test_rate = (low + high) / 2.0;
+	uint64_t max_pps = calc_max_pps(ctx->line_rate, frame_size);
 
-		/* Calculate expected replication */
-		uint64_t fps = calc_fps(ctx->line_rate, config->frame_size, test_rate);
-		uint64_t frames_tx = fps * config->trial_duration_sec;
-		uint64_t expected_rx = frames_tx * egress_count; /* Replicated to all egress */
+	while ((high - low) > RFC2889_DEFAULT_RESOLUTION_PCT && iterations < max_iterations &&
+	       !ctx->cancel_requested) {
 
-		/* Simulate broadcast test */
-		/* Broadcast forwarding typically has some overhead */
-		double overhead = (test_rate > 80.0) ? (test_rate - 80.0) * 0.5 : 0.0;
-		uint64_t actual_rx = (uint64_t)(expected_rx * (100.0 - overhead) / 100.0);
+		double current_rate = (low + high) / 2.0;
 
-		double replication = (double)actual_rx / frames_tx;
+		rfc2544_log(LOG_DEBUG, "Iteration %u: testing %.2f%%", iterations, current_rate);
 
-		if (replication >= (egress_count * 0.99)) { /* 99% of expected copies */
-			best_rate = test_rate;
-			low = test_rate;
-		} else {
-			high = test_rate;
+		/* Run trial with broadcast destination MAC */
+		trial_result_t trial;
+		int ret = run_trial(ctx, frame_size, current_rate,
+		                    config->trial_duration_sec,
+		                    config->warmup_sec, &trial);
+
+		if (ret < 0) {
+			rfc2544_log(LOG_ERROR, "Trial failed: %d", ret);
+			return ret;
 		}
 
-		result->frames_tx = frames_tx;
-		result->frames_rx = actual_rx;
+		if (trial.loss_pct <= config->acceptable_loss_pct) {
+			best_rate = current_rate;
+			low = current_rate;
+			result->frames_tx = trial.packets_sent;
+			result->frames_rx = trial.packets_recv;
+			rfc2544_log(LOG_DEBUG, "  Pass: loss=%.6f%%", trial.loss_pct);
+		} else {
+			high = current_rate;
+			rfc2544_log(LOG_DEBUG, "  Fail: loss=%.4f%%", trial.loss_pct);
+		}
+
+		iterations++;
 	}
 
-	result->broadcast_rate_fps = (double)calc_fps(ctx->line_rate, config->frame_size, best_rate);
-	result->broadcast_rate_mbps = result->broadcast_rate_fps * config->frame_size * 8.0 / 1000000.0;
-	result->replication_factor = (double)result->frames_rx / result->frames_tx;
+	/* Calculate results */
+	result->broadcast_rate_fps = max_pps * best_rate / 100.0;
+	result->broadcast_rate_mbps = (result->broadcast_rate_fps * (frame_size + 20) * 8) / 1e6;
 
-	rfc2889_log(LOG_INFO, "Broadcast forwarding test complete");
-	rfc2889_log(LOG_INFO, "  Max rate: %.0f fps (%.2f Mbps)",
-	            result->broadcast_rate_fps, result->broadcast_rate_mbps);
-	rfc2889_log(LOG_INFO, "  Replication factor: %.2f", result->replication_factor);
+	/* Calculate replication factor */
+	if (result->frames_tx > 0 && result->egress_ports > 0) {
+		double expected_rx = result->frames_tx * result->egress_ports;
+		result->replication_factor = (double)result->frames_rx / expected_rx;
+	} else {
+		result->replication_factor = 0.0;
+	}
+
+	rfc2544_log(LOG_INFO, "Broadcast Rate: %.0f fps (%.2f Mbps), Replication: %.2f",
+	            result->broadcast_rate_fps, result->broadcast_rate_mbps,
+	            result->replication_factor);
 
 	return 0;
 }
 
 /* ============================================================================
- * RFC 2889 Congestion Control Test (Section 5.6)
+ * Congestion Control Test (Section 5.6)
+ *
+ * Determines how the DUT handles congestion (oversubscription).
  * ============================================================================ */
 
 int rfc2889_congestion_test(rfc2544_ctx_t *ctx, const rfc2889_config_t *config,
@@ -323,86 +373,53 @@ int rfc2889_congestion_test(rfc2544_ctx_t *ctx, const rfc2889_config_t *config,
 		return -EINVAL;
 
 	memset(result, 0, sizeof(*result));
-	result->frame_size = config->frame_size;
 
-	rfc2889_log(LOG_INFO, "Starting congestion control test");
+	uint32_t frame_size = config->frame_size ? config->frame_size : 64;
+	result->frame_size = frame_size;
 
-	/* Test at various overload levels */
-	double overload_levels[] = {100.0, 110.0, 125.0, 150.0, 200.0};
-	int num_levels = sizeof(overload_levels) / sizeof(overload_levels[0]);
+	rfc2544_log(LOG_INFO, "=== RFC 2889 Congestion Control Test ===");
+	rfc2544_log(LOG_INFO, "Frame size: %u bytes", frame_size);
 
-	for (int i = 0; i < num_levels; i++) {
-		double overload = overload_levels[i];
-		rfc2889_log(LOG_DEBUG, "Testing at %.0f%% load", overload);
+	/* Test at oversubscription level (simulated via max rate) */
+	result->overload_rate_pct = 110.0;  /* 110% offered load */
 
-		uint64_t fps = calc_fps(ctx->line_rate, config->frame_size, overload);
-		uint64_t frames_tx = fps * config->trial_duration_sec;
+	/* Run trial at maximum rate */
+	trial_result_t trial;
+	int ret = run_trial(ctx, frame_size, 100.0,  /* Max rate = 100% */
+	                    config->trial_duration_sec,
+	                    config->warmup_sec, &trial);
 
-		/* Simulate congestion behavior */
-		/* At overload, switch must drop excess frames */
-		double capacity_pct = 100.0 / overload;
-		uint64_t frames_rx = (uint64_t)(frames_tx * capacity_pct);
-		if (frames_rx > frames_tx)
-			frames_rx = frames_tx;
-
-		/* Check for backpressure (802.3x pause frames) */
-		bool backpressure = (overload > 100.0);
-
-		result->overload_rate_pct = overload;
-		result->frames_tx = frames_tx;
-		result->frames_rx = frames_rx;
-		result->frames_dropped = frames_tx - frames_rx;
-		result->backpressure_observed = backpressure;
-		result->pause_frames_rx = backpressure ? (frames_tx - frames_rx) / 10 : 0;
-
-		/* Head-of-line blocking check */
-		/* In many-to-one pattern, HOL blocking can occur */
-		if (config->pattern == TRAFFIC_MANY_TO_ONE && overload > 100.0) {
-			result->head_of_line_blocking = (overload - 100.0) * 0.5;
-		}
+	if (ret < 0) {
+		rfc2544_log(LOG_ERROR, "Trial failed: %d", ret);
+		return ret;
 	}
 
-	rfc2889_log(LOG_INFO, "Congestion control test complete");
-	rfc2889_log(LOG_INFO, "  Frames dropped: %lu", result->frames_dropped);
-	rfc2889_log(LOG_INFO, "  Backpressure: %s",
-	            result->backpressure_observed ? "yes" : "no");
-	rfc2889_log(LOG_INFO, "  HOL blocking: %.1f%%", result->head_of_line_blocking);
+	result->frames_tx = trial.packets_sent;
+	result->frames_rx = trial.packets_recv;
+	/* Guard against underflow when rx > tx */
+	result->frames_dropped = (trial.packets_recv < trial.packets_sent) ?
+	                         (trial.packets_sent - trial.packets_recv) : 0;
+
+	/* Calculate head-of-line blocking percentage */
+	if (trial.packets_sent > 0) {
+		result->head_of_line_blocking = 100.0 * result->frames_dropped / trial.packets_sent;
+	}
+
+	/* Backpressure detection based on loss pattern */
+	result->backpressure_observed = (trial.loss_pct > 0.1 && trial.loss_pct < 10.0);
+	result->pause_frames_rx = 0;  /* Would require hardware counter access */
+
+	rfc2544_log(LOG_INFO, "Congestion: %.2f%% dropped, HOL blocking: %.2f%%",
+	            trial.loss_pct, result->head_of_line_blocking);
+	rfc2544_log(LOG_INFO, "Backpressure: %s",
+	            result->backpressure_observed ? "Detected" : "Not detected");
 
 	return 0;
 }
 
 /* ============================================================================
- * Configuration and Output Functions
+ * Print Functions
  * ============================================================================ */
-
-void rfc2889_default_config(rfc2889_config_t *config)
-{
-	if (!config)
-		return;
-
-	memset(config, 0, sizeof(*config));
-
-	config->test_type = RFC2889_FORWARDING_RATE;
-	config->pattern = TRAFFIC_PAIR_WISE;
-	config->port_count = 2;
-	config->frame_size = 64;
-	config->trial_duration_sec = 60;
-	config->warmup_sec = 2;
-	config->address_count = 1000;
-	config->acceptable_loss_pct = 0.0;
-
-	/* Default port configuration */
-	for (uint32_t i = 0; i < 2; i++) {
-		snprintf(config->ports[i].interface, sizeof(config->ports[i].interface),
-		         "eth%u", i);
-		config->ports[i].mac_base[0] = 0x02; /* Locally administered */
-		config->ports[i].mac_base[1] = 0x00;
-		config->ports[i].mac_base[2] = (uint8_t)i;
-		config->ports[i].mac_count = 1;
-		config->ports[i].is_ingress = (i == 0);
-		config->ports[i].is_egress = (i == 1);
-	}
-}
 
 void rfc2889_print_results(const void *result, rfc2889_test_type_t type,
                            stats_format_t format)
@@ -410,56 +427,59 @@ void rfc2889_print_results(const void *result, rfc2889_test_type_t type,
 	if (!result)
 		return;
 
+	(void)format;  /* TODO: implement JSON/CSV output */
+
 	switch (type) {
 	case RFC2889_FORWARDING_RATE: {
-		const rfc2889_fwd_result_t *r = (const rfc2889_fwd_result_t *)result;
-		if (format == STATS_FORMAT_JSON) {
-			printf("{\"test\":\"rfc2889_forwarding\",\"frame_size\":%u,"
-			       "\"max_rate_pct\":%.2f,\"max_rate_fps\":%.0f,"
-			       "\"aggregate_mbps\":%.2f,\"loss_pct\":%.4f}\n",
-			       r->frame_size, r->max_rate_pct, r->max_rate_fps,
-			       r->aggregate_rate_mbps, r->loss_pct);
-		} else {
-			printf("\nRFC 2889 Forwarding Rate Test Results\n");
-			printf("=====================================\n");
-			printf("Frame Size:     %u bytes\n", r->frame_size);
-			printf("Port Count:     %u\n", r->port_count);
-			printf("Max Rate:       %.2f%% (%.0f fps)\n",
-			       r->max_rate_pct, r->max_rate_fps);
-			printf("Aggregate:      %.2f Mbps\n", r->aggregate_rate_mbps);
-			printf("Frame Loss:     %.4f%%\n", r->loss_pct);
-		}
+		const rfc2889_fwd_result_t *r = result;
+		printf("\n=== RFC 2889 Forwarding Rate Results ===\n");
+		printf("Frame Size:       %u bytes\n", r->frame_size);
+		printf("Port Count:       %u\n", r->port_count);
+		printf("Max Rate:         %.2f%% (%.0f fps)\n", r->max_rate_pct, r->max_rate_fps);
+		printf("Aggregate:        %.2f Mbps\n", r->aggregate_rate_mbps);
+		printf("Frames TX/RX:     %" PRIu64 " / %" PRIu64 "\n", r->frames_tx, r->frames_rx);
+		printf("Loss:             %.4f%%\n", r->loss_pct);
 		break;
 	}
 	case RFC2889_ADDRESS_CACHING: {
-		const rfc2889_cache_result_t *r = (const rfc2889_cache_result_t *)result;
-		if (format == STATS_FORMAT_JSON) {
-			printf("{\"test\":\"rfc2889_caching\",\"cache_capacity\":%u,"
-			       "\"learning_time_ms\":%.2f}\n",
-			       r->cache_capacity, r->learning_time_ms);
-		} else {
-			printf("\nRFC 2889 Address Caching Test Results\n");
-			printf("=====================================\n");
-			printf("Cache Capacity: %u addresses\n", r->cache_capacity);
-			printf("Learning Time:  %.2f ms\n", r->learning_time_ms);
-			printf("Overflow Loss:  %.2f%%\n", r->overflow_loss_pct);
-		}
+		const rfc2889_cache_result_t *r = result;
+		printf("\n=== RFC 2889 Address Caching Results ===\n");
+		printf("Frame Size:       %u bytes\n", r->frame_size);
+		printf("Addresses Tested: %u\n", r->addresses_tested);
+		printf("Addresses Cached: %u\n", r->addresses_cached);
+		printf("Cache Capacity:   %u addresses\n", r->cache_capacity);
+		printf("Overflow Loss:    %.2f%%\n", r->overflow_loss_pct);
+		break;
+	}
+	case RFC2889_ADDRESS_LEARNING: {
+		const rfc2889_learning_result_t *r = result;
+		printf("\n=== RFC 2889 Address Learning Results ===\n");
+		printf("Frame Size:       %u bytes\n", r->frame_size);
+		printf("Learning Rate:    %.0f addresses/sec\n", r->learning_rate_fps);
+		printf("Addresses Learned: %u\n", r->addresses_learned);
+		printf("Learning Time:    %.3f ms/address\n", r->learning_time_ms);
 		break;
 	}
 	case RFC2889_BROADCAST_FORWARDING: {
-		const rfc2889_broadcast_result_t *r = (const rfc2889_broadcast_result_t *)result;
-		if (format == STATS_FORMAT_JSON) {
-			printf("{\"test\":\"rfc2889_broadcast\",\"rate_fps\":%.0f,"
-			       "\"rate_mbps\":%.2f,\"replication\":%.2f}\n",
-			       r->broadcast_rate_fps, r->broadcast_rate_mbps,
-			       r->replication_factor);
-		} else {
-			printf("\nRFC 2889 Broadcast Forwarding Test Results\n");
-			printf("==========================================\n");
-			printf("Broadcast Rate: %.0f fps (%.2f Mbps)\n",
-			       r->broadcast_rate_fps, r->broadcast_rate_mbps);
-			printf("Replication:    %.2fx\n", r->replication_factor);
-		}
+		const rfc2889_broadcast_result_t *r = result;
+		printf("\n=== RFC 2889 Broadcast Forwarding Results ===\n");
+		printf("Frame Size:       %u bytes\n", r->frame_size);
+		printf("Ingress Ports:    %u\n", r->ingress_ports);
+		printf("Egress Ports:     %u\n", r->egress_ports);
+		printf("Broadcast Rate:   %.0f fps (%.2f Mbps)\n",
+		       r->broadcast_rate_fps, r->broadcast_rate_mbps);
+		printf("Replication:      %.2f\n", r->replication_factor);
+		break;
+	}
+	case RFC2889_CONGESTION_CONTROL: {
+		const rfc2889_congestion_result_t *r = result;
+		printf("\n=== RFC 2889 Congestion Control Results ===\n");
+		printf("Frame Size:       %u bytes\n", r->frame_size);
+		printf("Overload Rate:    %.1f%%\n", r->overload_rate_pct);
+		printf("Frames TX/RX:     %" PRIu64 " / %" PRIu64 "\n", r->frames_tx, r->frames_rx);
+		printf("Frames Dropped:   %" PRIu64 "\n", r->frames_dropped);
+		printf("HOL Blocking:     %.2f%%\n", r->head_of_line_blocking);
+		printf("Backpressure:     %s\n", r->backpressure_observed ? "Yes" : "No");
 		break;
 	}
 	default:

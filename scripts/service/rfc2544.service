@@ -1,29 +1,80 @@
 [Unit]
-Description=RFC2544 Test Master
+Description=RFC2544 Test Master - Network Benchmark Service
 Documentation=https://github.com/krisarmstrong/rfc2544-master
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/rfc2544 --web :8080
-Restart=on-failure
-RestartSec=5s
 
-# Security hardening
+# Run as dedicated user for security (created by postinst)
+User=rfc2544
+Group=rfc2544
+
+# Configuration
+EnvironmentFile=-/etc/rfc2544/environment
+
+# Main executable - Web UI mode by default
+# Customize in /etc/rfc2544/environment: RFC2544_ARGS="--web :8080 --interface eth0"
+ExecStart=/usr/bin/rfc2544 ${RFC2544_ARGS:---web :8080}
+
+# Restart policy
+Restart=on-failure
+RestartSec=5
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+# ============================================================================
+# Capability-Based Security (allows non-root operation)
+# ============================================================================
+# CAP_NET_RAW - Required for raw packet access (AF_PACKET, AF_XDP)
+# CAP_NET_ADMIN - Required for interface configuration
+# CAP_SYS_ADMIN - Required for BPF programs (AF_XDP)
+# CAP_IPC_LOCK - Required for UMEM memory locking
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN CAP_SYS_ADMIN CAP_IPC_LOCK
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN CAP_SYS_ADMIN CAP_IPC_LOCK
+
+# ============================================================================
+# Security Hardening
+# ============================================================================
 NoNewPrivileges=false
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ProtectKernelTunables=true
+ProtectKernelTunables=false   # Need access for /proc/sys/net
+ProtectKernelModules=true
+ProtectKernelLogs=true
 ProtectControlGroups=true
+ProtectHostname=true
+ProtectClock=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RemoveIPC=true
+PrivateMounts=true
 
-# Network requirements
-AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN CAP_SYS_ADMIN
-CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN CAP_SYS_ADMIN
+# Allow read-only access to most paths
+ReadOnlyPaths=/
 
-# Resource limits
-LimitNOFILE=65536
+# Write access for logs, state, and test results
+ReadWritePaths=/var/log/rfc2544 /var/lib/rfc2544 /run/rfc2544
+
+# Network namespaces - keep access to host network
+PrivateNetwork=false
+
+# ============================================================================
+# Resource Limits
+# ============================================================================
+# Required for high-rate packet processing
+LimitNOFILE=1048576
 LimitMEMLOCK=infinity
+LimitNPROC=4096
+
+# ============================================================================
+# Logging
+# ============================================================================
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rfc2544
 
 [Install]
 WantedBy=multi-user.target

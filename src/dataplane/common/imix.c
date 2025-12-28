@@ -186,9 +186,14 @@ int rfc2544_imix_throughput(rfc2544_ctx_t *ctx, const imix_config_t *imix_config
 	}
 
 	if (result->total_frames_tx > 0) {
-		result->loss_pct = 100.0 *
-		                   (double)(result->total_frames_tx - result->total_frames_rx) /
-		                   result->total_frames_tx;
+		/* Guard against underflow when rx > tx */
+		if (result->total_frames_rx >= result->total_frames_tx) {
+			result->loss_pct = 0.0;
+		} else {
+			result->loss_pct = 100.0 *
+			                   (double)(result->total_frames_tx - result->total_frames_rx) /
+			                   result->total_frames_tx;
+		}
 	}
 
 	rfc2544_log(LOG_INFO, "IMIX Test Complete: %.2f Mbps, avg frame %.0f bytes, %.4f%% loss",

@@ -13,13 +13,46 @@ import (
 type TestType string
 
 const (
-	TestThroughput   TestType = "Throughput"
-	TestLatency      TestType = "Latency"
-	TestFrameLoss    TestType = "Frame Loss"
-	TestBackToBack   TestType = "Back-to-Back"
-	TestY1564Config  TestType = "Y.1564 Config"
-	TestY1564Perf    TestType = "Y.1564 Perf"
-	TestY1564Full    TestType = "Y.1564 Full"
+	// RFC 2544 Tests
+	TestThroughput     TestType = "Throughput"
+	TestLatency        TestType = "Latency"
+	TestFrameLoss      TestType = "Frame Loss"
+	TestBackToBack     TestType = "Back-to-Back"
+	TestSystemRecovery TestType = "System Recovery"
+	TestReset          TestType = "Reset"
+
+	// Y.1564 Tests
+	TestY1564Config TestType = "Y.1564 Config"
+	TestY1564Perf   TestType = "Y.1564 Perf"
+	TestY1564Full   TestType = "Y.1564 Full"
+
+	// RFC 2889 LAN Switch Tests
+	TestRFC2889Forwarding TestType = "RFC2889 Forwarding"
+	TestRFC2889Caching    TestType = "RFC2889 Caching"
+	TestRFC2889Learning   TestType = "RFC2889 Learning"
+	TestRFC2889Broadcast  TestType = "RFC2889 Broadcast"
+	TestRFC2889Congestion TestType = "RFC2889 Congestion"
+
+	// RFC 6349 TCP Tests
+	TestRFC6349Throughput TestType = "RFC6349 Throughput"
+	TestRFC6349Path       TestType = "RFC6349 Path"
+
+	// Y.1731 OAM Tests
+	TestY1731Delay    TestType = "Y.1731 Delay"
+	TestY1731Loss     TestType = "Y.1731 Loss"
+	TestY1731SLM      TestType = "Y.1731 SLM"
+	TestY1731Loopback TestType = "Y.1731 Loopback"
+
+	// MEF Tests
+	TestMEFConfig TestType = "MEF Config"
+	TestMEFPerf   TestType = "MEF Perf"
+	TestMEFFull   TestType = "MEF Full"
+
+	// TSN Tests
+	TestTSNTiming    TestType = "TSN Timing"
+	TestTSNIsolation TestType = "TSN Isolation"
+	TestTSNLatency   TestType = "TSN Latency"
+	TestTSNFull      TestType = "TSN Full"
 )
 
 // Stats represents real-time test statistics
@@ -278,10 +311,11 @@ func (a *App) initResultsView() {
 func (a *App) UpdateStats(s Stats) {
 	a.stats = s
 	a.app.QueueUpdateDraw(func() {
-		// Check if this is a Y.1564 test type
-		isY1564 := s.TestType == TestY1564Config || s.TestType == TestY1564Perf || s.TestType == TestY1564Full
+		// Check if this is a Y.1564 or MEF test type (SLA-based display)
+		isSLATest := s.TestType == TestY1564Config || s.TestType == TestY1564Perf || s.TestType == TestY1564Full ||
+			s.TestType == TestMEFConfig || s.TestType == TestMEFPerf || s.TestType == TestMEFFull
 
-		if isY1564 {
+		if isSLATest {
 			a.updateY1564Stats(s)
 		} else {
 			a.updateRFC2544Stats(s)

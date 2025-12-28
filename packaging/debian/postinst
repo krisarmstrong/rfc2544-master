@@ -1,0 +1,62 @@
+#!/bin/bash
+set -e
+
+case "$1" in
+    configure)
+        # Create rfc2544 user and group if they don't exist
+        if ! getent group rfc2544 >/dev/null; then
+            groupadd --system rfc2544
+        fi
+
+        if ! getent passwd rfc2544 >/dev/null; then
+            useradd --system --gid rfc2544 --no-create-home \
+                --home-dir /var/lib/rfc2544 --shell /usr/sbin/nologin \
+                --comment "RFC2544 Test Master daemon" rfc2544
+        fi
+
+        # Create required directories
+        mkdir -p /var/log/rfc2544 /var/lib/rfc2544 /run/rfc2544
+        chown rfc2544:rfc2544 /var/log/rfc2544 /var/lib/rfc2544 /run/rfc2544
+        chmod 755 /var/log/rfc2544 /var/lib/rfc2544
+        chmod 755 /run/rfc2544
+
+        # Set file capabilities on the binary
+        if command -v setcap >/dev/null 2>&1; then
+            setcap 'cap_net_raw,cap_net_admin,cap_sys_admin,cap_ipc_lock+ep' /usr/bin/rfc2544 || true
+        fi
+
+        # Ensure config directory permissions
+        mkdir -p /etc/rfc2544
+        chown root:rfc2544 /etc/rfc2544
+        chmod 750 /etc/rfc2544
+
+        # Reload systemd
+        systemctl daemon-reload || true
+
+        echo ""
+        echo "╔═══════════════════════════════════════════════════════════╗"
+        echo "║  RFC2544 Test Master installed successfully!              ║"
+        echo "╠═══════════════════════════════════════════════════════════╣"
+        echo "║  Start web UI:   sudo systemctl start rfc2544             ║"
+        echo "║  Enable at boot: sudo systemctl enable rfc2544            ║"
+        echo "║  View logs:      journalctl -u rfc2544 -f                 ║"
+        echo "║  Web UI:         http://localhost:8080                    ║"
+        echo "║                                                           ║"
+        echo "║  CLI usage:      rfc2544 <interface> --test <type>        ║"
+        echo "║  Test types:     throughput, latency, loss, burst         ║"
+        echo "╚═══════════════════════════════════════════════════════════╝"
+        echo ""
+        ;;
+
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+
+    *)
+        echo "postinst called with unknown argument: $1" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

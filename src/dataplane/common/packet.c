@@ -121,7 +121,20 @@ rfc2544_payload_t *rfc2544_create_packet_template(uint8_t *buffer, uint32_t fram
                                                    uint16_t src_port, uint16_t dst_port,
                                                    uint32_t stream_id)
 {
-	if (!buffer || frame_size < RFC2544_MIN_FRAME) {
+	/* Minimum frame size must fit all headers + payload:
+	 * 14 (Ethernet) + 20 (IPv4) + 8 (UDP) + 24 (payload) = 66 bytes */
+	const uint32_t min_frame = sizeof(eth_header_t) + sizeof(ip_header_t) +
+	                           sizeof(udp_header_t) + sizeof(rfc2544_payload_t);
+
+	if (!buffer) {
+		return NULL;
+	}
+
+	if (frame_size < min_frame) {
+		fprintf(stderr, "[packet] Frame size %u too small (minimum: %u bytes)\n",
+		        frame_size, min_frame);
+		fprintf(stderr, "[packet] Tip: RFC2544 payload requires 24 bytes for signature, "
+		        "sequence, timestamp, and stream ID\n");
 		return NULL;
 	}
 
@@ -483,7 +496,11 @@ y1564_payload_t *y1564_create_packet_template(uint8_t *buffer, uint32_t frame_si
                                                uint16_t src_port, uint16_t dst_port,
                                                uint32_t service_id, uint8_t dscp)
 {
-	if (!buffer || frame_size < Y1564_MIN_FRAME) {
+	/* Minimum frame size must fit all headers + payload */
+	const uint32_t min_frame = sizeof(eth_header_t) + sizeof(ip_header_t) +
+	                           sizeof(udp_header_t) + sizeof(y1564_payload_t);
+
+	if (!buffer || frame_size < min_frame) {
 		return NULL;
 	}
 

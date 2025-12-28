@@ -35,7 +35,7 @@ extern "C" {
 
 /* Standard RFC 2544 frame sizes (Section 9.1) */
 typedef enum {
-	FRAME_SIZE_64 = 64,
+	FRAME_SIZE_64 = 64,     /* Note: Requires 66+ bytes due to 24-byte payload */
 	FRAME_SIZE_128 = 128,
 	FRAME_SIZE_256 = 256,
 	FRAME_SIZE_512 = 512,
@@ -45,10 +45,25 @@ typedef enum {
 	FRAME_SIZE_9000 = 9000 /* Jumbo (optional) */
 } frame_size_t;
 
-/* Standard frame sizes array */
+/*
+ * Minimum frame size is 66 bytes due to payload structure:
+ *   14 (Ethernet) + 20 (IPv4) + 8 (UDP) + 24 (RFC2544 payload) = 66 bytes
+ *
+ * The RFC2544 payload contains:
+ *   7 bytes - "RFC2544" signature (for reflector detection)
+ *   4 bytes - sequence number (loss detection)
+ *   8 bytes - timestamp (latency measurement)
+ *   4 bytes - stream ID (multi-stream support)
+ *   1 byte  - flags
+ *
+ * Note: True 64-byte frame testing would require a compact payload format.
+ */
+#define RFC2544_MIN_FRAME_SIZE 66
+
+/* Standard frame sizes array - starts at 128 for full payload support */
 #define RFC2544_FRAME_SIZES                                                                        \
-	{64, 128, 256, 512, 1024, 1280, 1518}
-#define RFC2544_FRAME_SIZE_COUNT 7
+	{128, 256, 512, 1024, 1280, 1518}
+#define RFC2544_FRAME_SIZE_COUNT 6
 
 /* Test types */
 typedef enum {
@@ -438,6 +453,7 @@ typedef struct {
 
 	/* Platform selection */
 	bool use_dpdk;            /* Use DPDK for packet I/O */
+	bool force_packet;        /* Force AF_PACKET (for veth/testing) */
 	char *dpdk_args;          /* DPDK EAL arguments */
 
 	/* IMIX configuration */

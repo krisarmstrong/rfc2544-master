@@ -1,0 +1,14 @@
+rfc2544-master (2.0.0-1) unstable; urgency=medium
+
+  * Initial 2.0.0 release
+  * RFC 2544 throughput, latency, frame loss, back-to-back tests
+  * ITU-T Y.1564 EtherSAM service testing
+  * ITU-T Y.1731 OAM performance monitoring
+  * RFC 2889 LAN switch testing
+  * RFC 6349 TCP throughput testing
+  * AF_XDP and AF_PACKET support
+  * Systemd service with capability-based non-root operation
+  * Web UI for remote monitoring
+  * JSON/CSV output formats
+
+ -- Kris Armstrong <kris.armstrong@me.com>  Fri, 27 Dec 2024 12:00:00 -0500

@@ -13,15 +13,46 @@ import (
 type TestType string
 
 const (
+	// RFC 2544 Tests
 	TestThroughput      TestType = "throughput"       // Section 26.1
 	TestLatency         TestType = "latency"          // Section 26.2
 	TestFrameLoss       TestType = "frame_loss"       // Section 26.3
 	TestBackToBack      TestType = "back_to_back"     // Section 26.4
 	TestSystemRecovery  TestType = "system_recovery"  // Section 26.5
 	TestReset           TestType = "reset"            // Section 26.6
-	TestY1564Config     TestType = "y1564_config"     // ITU-T Y.1564 Service Configuration Test
-	TestY1564Perf       TestType = "y1564_perf"       // ITU-T Y.1564 Service Performance Test
-	TestY1564Full       TestType = "y1564"            // ITU-T Y.1564 Full Test (Config + Perf)
+
+	// ITU-T Y.1564 (EtherSAM) Tests
+	TestY1564Config     TestType = "y1564_config"     // Service Configuration Test
+	TestY1564Perf       TestType = "y1564_perf"       // Service Performance Test
+	TestY1564Full       TestType = "y1564"            // Full Test (Config + Perf)
+
+	// RFC 2889 LAN Switch Tests
+	TestRFC2889Forwarding TestType = "rfc2889_forwarding" // Forwarding Rate
+	TestRFC2889Caching    TestType = "rfc2889_caching"    // Address Caching
+	TestRFC2889Learning   TestType = "rfc2889_learning"   // Address Learning
+	TestRFC2889Broadcast  TestType = "rfc2889_broadcast"  // Broadcast Forwarding
+	TestRFC2889Congestion TestType = "rfc2889_congestion" // Congestion Control
+
+	// RFC 6349 TCP Tests
+	TestRFC6349Throughput TestType = "rfc6349_throughput" // TCP Throughput
+	TestRFC6349Path       TestType = "rfc6349_path"       // Path Analysis
+
+	// ITU-T Y.1731 OAM Tests
+	TestY1731Delay    TestType = "y1731_delay"    // Delay Measurement (DMM/DMR)
+	TestY1731Loss     TestType = "y1731_loss"     // Loss Measurement (LMM/LMR)
+	TestY1731SLM      TestType = "y1731_slm"      // Synthetic Loss Measurement
+	TestY1731Loopback TestType = "y1731_loopback" // Loopback (LBM/LBR)
+
+	// MEF Service Activation Tests
+	TestMEFConfig TestType = "mef_config" // MEF Configuration Test
+	TestMEFPerf   TestType = "mef_perf"   // MEF Performance Test
+	TestMEFFull   TestType = "mef"        // Full MEF Test
+
+	// IEEE 802.1Qbv TSN Tests
+	TestTSNTiming    TestType = "tsn_timing"    // Gate Timing Accuracy
+	TestTSNIsolation TestType = "tsn_isolation" // Traffic Class Isolation
+	TestTSNLatency   TestType = "tsn_latency"   // Scheduled Latency
+	TestTSNFull      TestType = "tsn"           // Full TSN Test Suite
 )
 
 // OutputFormat for results
@@ -82,6 +113,13 @@ type Config struct {
 
 	// ITU-T Y.1564 (EtherSAM) configuration
 	Y1564 Y1564Config `yaml:"y1564"`
+
+	// Extended protocol test configurations
+	RFC2889 RFC2889Config `yaml:"rfc2889"` // RFC 2889 LAN Switch tests
+	RFC6349 RFC6349Config `yaml:"rfc6349"` // RFC 6349 TCP tests
+	Y1731   Y1731Config   `yaml:"y1731"`   // Y.1731 OAM tests
+	MEF     MEFConfig     `yaml:"mef"`     // MEF Service Activation tests
+	TSN     TSNConfig     `yaml:"tsn"`     // TSN tests
 }
 
 // ThroughputConfig for binary search throughput test
@@ -146,6 +184,120 @@ type Y1564Config struct {
 	PerfDuration    time.Duration  `yaml:"perf_duration"`     // Performance test duration (default: 15m)
 	RunConfigTest   bool           `yaml:"run_config_test"`   // Run configuration test
 	RunPerfTest     bool           `yaml:"run_perf_test"`     // Run performance test
+}
+
+// RFC2889Config for LAN switch benchmarking tests
+type RFC2889Config struct {
+	PortCount         uint32        `yaml:"port_count"`          // Number of ports
+	AddressCount      uint32        `yaml:"address_count"`       // MAC addresses for caching test
+	TrialDuration     time.Duration `yaml:"trial_duration"`      // Duration per trial
+	AcceptableLossPct float64       `yaml:"acceptable_loss_pct"` // Acceptable loss percentage
+}
+
+// RFC6349Config for TCP throughput testing
+type RFC6349Config struct {
+	TargetRateMbps   float64       `yaml:"target_rate_mbps"`   // Target rate (0 = auto)
+	MSS              uint32        `yaml:"mss"`                // Maximum Segment Size
+	RWND             uint32        `yaml:"rwnd"`               // Receive Window Size
+	TestDuration     time.Duration `yaml:"test_duration"`      // Test duration
+	ParallelStreams  uint32        `yaml:"parallel_streams"`   // Number of parallel streams
+}
+
+// Y1731Config for Ethernet OAM testing
+type Y1731Config struct {
+	MEPID       uint32        `yaml:"mep_id"`       // MEP identifier
+	MEGLevel    uint8         `yaml:"meg_level"`    // MEG level (0-7)
+	MEGID       string        `yaml:"meg_id"`       // MEG identifier
+	CCMInterval uint32        `yaml:"ccm_interval"` // CCM interval (ms)
+	ProbeCount  uint32        `yaml:"probe_count"`  // Number of probes
+	ProbeInterval time.Duration `yaml:"probe_interval"` // Interval between probes
+}
+
+// MEFConfig for service activation testing
+type MEFConfig struct {
+	CIRMbps          float64       `yaml:"cir_mbps"`           // Committed Information Rate
+	EIRMbps          float64       `yaml:"eir_mbps"`           // Excess Information Rate
+	CBSBytes         uint32        `yaml:"cbs_bytes"`          // Committed Burst Size
+	EBSBytes         uint32        `yaml:"ebs_bytes"`          // Excess Burst Size
+	FDThresholdUs    float64       `yaml:"fd_threshold_us"`    // Frame Delay threshold (us)
+	FDVThresholdUs   float64       `yaml:"fdv_threshold_us"`   // Frame Delay Variation (us)
+	FLRThresholdPct  float64       `yaml:"flr_threshold_pct"`  // Frame Loss Ratio threshold
+	AvailThresholdPct float64      `yaml:"avail_threshold_pct"` // Availability threshold
+	ConfigDuration   time.Duration `yaml:"config_duration"`    // Config test duration
+	PerfDuration     time.Duration `yaml:"perf_duration"`      // Perf test duration
+}
+
+// TSNConfig for Time-Sensitive Networking testing
+type TSNConfig struct {
+	NumClasses       uint32        `yaml:"num_classes"`        // Number of traffic classes
+	CycleTimeNs      uint64        `yaml:"cycle_time_ns"`      // GCL cycle time
+	MaxLatencyNs     uint64        `yaml:"max_latency_ns"`     // Maximum latency threshold
+	MaxJitterNs      uint64        `yaml:"max_jitter_ns"`      // Maximum jitter threshold
+	MaxSyncOffsetNs  uint64        `yaml:"max_sync_offset_ns"` // Maximum PTP sync offset
+	TestDuration     time.Duration `yaml:"test_duration"`      // Test duration
+	FrameSize        uint32        `yaml:"frame_size"`         // Frame size for testing
+}
+
+// DefaultRFC2889Config returns default RFC 2889 configuration
+func DefaultRFC2889Config() RFC2889Config {
+	return RFC2889Config{
+		PortCount:         2,
+		AddressCount:      8192,
+		TrialDuration:     60 * time.Second,
+		AcceptableLossPct: 0.0,
+	}
+}
+
+// DefaultRFC6349Config returns default RFC 6349 configuration
+func DefaultRFC6349Config() RFC6349Config {
+	return RFC6349Config{
+		TargetRateMbps:  0, // Auto-detect
+		MSS:             1460,
+		RWND:            65535,
+		TestDuration:    30 * time.Second,
+		ParallelStreams: 1,
+	}
+}
+
+// DefaultY1731Config returns default Y.1731 configuration
+func DefaultY1731Config() Y1731Config {
+	return Y1731Config{
+		MEPID:         1,
+		MEGLevel:      4,
+		MEGID:         "DEFAULT-MEG",
+		CCMInterval:   1000,
+		ProbeCount:    100,
+		ProbeInterval: time.Second,
+	}
+}
+
+// DefaultMEFConfig returns default MEF configuration
+func DefaultMEFConfig() MEFConfig {
+	return MEFConfig{
+		CIRMbps:          100.0,
+		EIRMbps:          0,
+		CBSBytes:         12000,
+		EBSBytes:         0,
+		FDThresholdUs:    10000, // 10ms
+		FDVThresholdUs:   5000,  // 5ms
+		FLRThresholdPct:  0.01,
+		AvailThresholdPct: 99.99,
+		ConfigDuration:   60 * time.Second,
+		PerfDuration:     15 * time.Minute,
+	}
+}
+
+// DefaultTSNConfig returns default TSN configuration
+func DefaultTSNConfig() TSNConfig {
+	return TSNConfig{
+		NumClasses:      8,
+		CycleTimeNs:     1000000, // 1ms
+		MaxLatencyNs:    100000,  // 100us
+		MaxJitterNs:     10000,   // 10us
+		MaxSyncOffsetNs: 1000,    // 1us
+		TestDuration:    60 * time.Second,
+		FrameSize:       128,
+	}
 }
 
 // DefaultY1564SLA returns default SLA parameters
@@ -220,6 +372,13 @@ func DefaultConfig() *Config {
 		},
 
 		Y1564: DefaultY1564Config(),
+
+		// Extended protocol test defaults
+		RFC2889: DefaultRFC2889Config(),
+		RFC6349: DefaultRFC6349Config(),
+		Y1731:   DefaultY1731Config(),
+		MEF:     DefaultMEFConfig(),
+		TSN:     DefaultTSNConfig(),
 	}
 }
 
@@ -264,7 +423,8 @@ func (c *Config) Validate() error {
 
 	// Validate test type
 	switch c.TestType {
-	case TestThroughput, TestLatency, TestFrameLoss, TestBackToBack:
+	case TestThroughput, TestLatency, TestFrameLoss, TestBackToBack,
+		TestSystemRecovery, TestReset:
 		// Valid RFC 2544 test types
 	case TestY1564Config, TestY1564Perf, TestY1564Full:
 		// Valid Y.1564 test types - validate Y.1564 config
@@ -275,6 +435,32 @@ func (c *Config) Validate() error {
 			if svc.Enabled && svc.SLA.CIRMbps <= 0 {
 				return fmt.Errorf("service %d: CIR must be > 0", i+1)
 			}
+		}
+	case TestRFC2889Forwarding, TestRFC2889Caching, TestRFC2889Learning,
+		TestRFC2889Broadcast, TestRFC2889Congestion:
+		// Valid RFC 2889 test types
+		if c.RFC2889.PortCount < 2 {
+			return fmt.Errorf("RFC 2889 tests require at least 2 ports")
+		}
+	case TestRFC6349Throughput, TestRFC6349Path:
+		// Valid RFC 6349 test types
+		if c.RFC6349.MSS == 0 {
+			return fmt.Errorf("RFC 6349 tests require MSS > 0")
+		}
+	case TestY1731Delay, TestY1731Loss, TestY1731SLM, TestY1731Loopback:
+		// Valid Y.1731 test types
+		if c.Y1731.MEPID == 0 {
+			return fmt.Errorf("Y.1731 tests require MEP ID > 0")
+		}
+	case TestMEFConfig, TestMEFPerf, TestMEFFull:
+		// Valid MEF test types
+		if c.MEF.CIRMbps <= 0 {
+			return fmt.Errorf("MEF tests require CIR > 0")
+		}
+	case TestTSNTiming, TestTSNIsolation, TestTSNLatency, TestTSNFull:
+		// Valid TSN test types
+		if c.TSN.CycleTimeNs == 0 {
+			return fmt.Errorf("TSN tests require cycle_time_ns > 0")
 		}
 	default:
 		return fmt.Errorf("invalid test type: %s", c.TestType)

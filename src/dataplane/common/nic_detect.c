@@ -25,6 +25,7 @@
 #ifdef __linux__
 #include <linux/ethtool.h>
 #include <linux/if.h>
+#include <linux/net_tstamp.h>
 #include <linux/sockios.h>
 #endif
 

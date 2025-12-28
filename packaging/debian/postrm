@@ -1,0 +1,28 @@
+#!/bin/bash
+set -e
+
+case "$1" in
+    purge)
+        if getent passwd rfc2544 >/dev/null; then
+            userdel rfc2544 || true
+        fi
+        if getent group rfc2544 >/dev/null; then
+            groupdel rfc2544 || true
+        fi
+
+        rm -rf /var/log/rfc2544 /var/lib/rfc2544 /run/rfc2544
+        rm -rf /etc/rfc2544
+        ;;
+
+    remove|upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+        ;;
+
+    *)
+        echo "postrm called with unknown argument: $1" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

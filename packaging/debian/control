@@ -1,0 +1,37 @@
+Source: rfc2544-master
+Section: net
+Priority: optional
+Maintainer: Kris Armstrong <kris.armstrong@me.com>
+Build-Depends: debhelper-compat (= 13), gcc, make
+Standards-Version: 4.6.0
+Homepage: https://github.com/krisarmstrong/rfc2544-master
+Vcs-Git: https://github.com/krisarmstrong/rfc2544-master.git
+Vcs-Browser: https://github.com/krisarmstrong/rfc2544-master
+Rules-Requires-Root: no
+
+Package: rfc2544-master
+Architecture: amd64 arm64
+Depends: ${shlibs:Depends}, ${misc:Depends}, libcap2-bin
+Recommends: libxdp1, libbpf1
+Suggests: dpdk
+Description: RFC2544 Network Benchmark Test Master
+ High-performance network benchmark testing per RFC 2544:
+ - Throughput testing with binary search (Section 26.1)
+ - Latency measurement at various loads (Section 26.2)
+ - Frame loss rate testing (Section 26.3)
+ - Back-to-back burst capacity testing (Section 26.4)
+ .
+ Also supports:
+ - ITU-T Y.1564 EtherSAM service testing
+ - ITU-T Y.1731 OAM performance monitoring
+ - RFC 2889 LAN switch testing
+ - RFC 6349 TCP throughput testing
+ - MEF carrier ethernet testing
+ - TSN time-sensitive networking
+ .
+ Features:
+ - AF_XDP for 10-40G performance
+ - Optional DPDK support for 100G line-rate
+ - Web UI for remote monitoring
+ - JSON/CSV output formats
+ - Systemd service with non-root operation via capabilities
